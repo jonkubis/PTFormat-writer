@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+# macOS
+.DS_Store
+# Large binary fixtures / synthesized output: the bulk is kept locally, not versioned.
+# (A minimal donor/control set IS committed — see control_files/README.md.)
+control_files/
+generated/
+
+# Donor pack build artifact (regenerate with: python -m ptxformatwriter.donorpack)
+*.pack

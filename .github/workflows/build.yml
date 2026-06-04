@@ -1,0 +1,13 @@
+name: ptxformatwriter CI
+run-name: Testing ptxformatwriter changes from ${{ github.actor }}
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install numpy
+      - run: make test
