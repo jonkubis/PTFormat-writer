@@ -415,6 +415,29 @@ class BodySynthTests(unittest.TestCase):
         finally:
             Path(path).unlink(missing_ok=True)
 
+    @unittest.skipUnless((CONTROL_DIR / "512 stereo tracks.ptx").exists() and 8 in _available(),
+                         "need 512-stereo universal library + 8-stereo donor")
+    def test_name_table_special_last_non_matching(self) -> None:
+        """REGRESSION (PT-confirmed 2026-06-19, macpair N=30): with no matching N-track
+        control, synthesize_mixed_session must rebuild the 0x2519 name table as
+        [header][N-1 normal][1 special-last]. The grow path otherwise strands the donor's
+        SPECIAL last entry mid-table (only base_n entries parse) -> Pro Tools throws
+        'end of stream encountered'. Guards: all N name entries present + clean reload."""
+        N = 30
+        lib512 = _load_path(CONTROL_DIR / "512 stereo tracks.ptx")
+        synth = BS.synthesize_mixed_session([2] * N, _load(8), (b"", 0), (lib512, 512))
+        blk = BS._by_type(BS.parse(synth), 0x2519)[0]
+        first_child = min(c.offset - 7 for c in blk.child)
+        n_entries = len(BS._name_table_entries(synth[blk.offset:first_child]))
+        self.assertEqual(n_entries, N, msg="0x2519 must contain all N name entries (special-last fix)")
+        self.assertEqual(len(BS.track_types(synth)), N)
+        with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+            tmp.write(W.encrypt_session_data(synth)); path = tmp.name
+        try:
+            self.assertEqual(PTFFormat().load(path, 48000), 0)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     @unittest.skipUnless(MTT_NOCLICK.exists(), "multiple-track-types control not present")
     def test_track_types_mixed(self) -> None:
         """track_types distinguishes mono / stereo / MIDI in the mixed control:
@@ -426,6 +449,91 @@ class BodySynthTests(unittest.TestCase):
         self.assertEqual(got.get("Audio 2"), ("stereo", 2), msg="Audio 2 should be stereo")
         self.assertEqual(got.get("MIDI 1"), ("midi", 0), msg="MIDI 1 should be midi")
         self.assertEqual(BS.channel_count(data), 3, msg="total audio channels")
+
+
+class StereoInlineTests(unittest.TestCase):
+    """The library-free, no-external-files stereo synthesizer (`synthesize_stereo_inline`):
+    inlined 8-track scaffold + two inlined 512-control unit templates + `synth_stereo_unit`
+    replace BOTH the per-N stereo library and the donor file. These tests need NO control
+    files (they exercise the inlined assets) -- so they run everywhere."""
+
+    def test_inline_builds_with_no_external_files(self) -> None:
+        """`synthesize_stereo_inline(n)` builds a valid n-stereo session from inlined assets
+        alone: correct track count, all n name-table entries, clean reparse + reader load.
+        n=12 and n=30 are byte-identical to PT-confirmed files (verified at integration)."""
+        for n in (8, 17, 30, 63):
+            synth = BS.synthesize_stereo_inline(n)
+            self.assertEqual(len(BS.track_types(synth)), n, msg=f"n={n} track count")
+            blk = BS._by_type(BS.parse(synth), 0x2519)[0]
+            first_child = min(c.offset - 7 for c in blk.child)
+            n_entries = len(BS._name_table_entries(synth[blk.offset:first_child]))
+            self.assertEqual(n_entries, n, msg=f"n={n}: all name entries present")
+            with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+                tmp.write(W.encrypt_session_data(synth)); path = tmp.name
+            try:
+                self.assertEqual(PTFFormat().load(path, 48000), 0, msg=f"n={n} reload")
+            finally:
+                Path(path).unlink(missing_ok=True)
+
+    def test_inline_guards(self) -> None:
+        """n below the scaffold (8) has no grow path; n above the validated ceiling (418)
+        hits the 0x5A-in-data scan-parse limit -- both raise ValueError, never silent
+        breakage."""
+        with self.assertRaises(ValueError):
+            BS.synthesize_stereo_inline(5)
+        with self.assertRaises(ValueError):
+            BS.synthesize_stereo_inline(BS._STEREO_INLINE_MAX + 1)
+
+    def test_inline_dup_mode_also_builds(self) -> None:
+        """`unique=False` (per-track GUID/blob duplicated) is also PT-valid (confirmed:
+        nolib30_dup) -- guard that it still produces a well-formed n-track session."""
+        synth = BS.synthesize_stereo_inline(12, unique=False)
+        self.assertEqual(len(BS.track_types(synth)), 12)
+
+    def test_generated_free_fields_are_magic_free(self) -> None:
+        """REGRESSION: the block parser scans payloads for the 0x5A magic, so the GENERATED
+        free fields (per-track 8-byte handle + 160 B blob) must contain no 0x5A -- otherwise
+        they form phantom blocks when the grow re-parses (handle 0xE000+346 = 0x..5A broke
+        N>=347). The deterministic fields match a real control, so only these need guarding."""
+        from ptxformatwriter import _stereo_data as SD
+        t1, t2, t3 = SD.stereo_templates()
+        for k in (90, 346, 512):   # k where the generated handle/blob would carry a 0x5A
+            u = BS.synth_stereo_unit(k, t1, t2, t3)
+            M = {1: BS._STEREO_MAP_1, 2: BS._STEREO_MAP_2, 3: BS._STEREO_MAP_3}[len(str(k))]
+            a, b = M["b261c"]["blob"]
+            self.assertNotIn(0x5A, u.b261c[a:b], msg=f"k={k}: blob carries the 0x5A magic")
+            blocks = BS._stereo_unit_blocks(u)
+            for key, spec in M.items():
+                for off in spec.get("guid", []):
+                    self.assertNotIn(0x5A, blocks[key][off:off + 2],
+                                     msg=f"k={k} {key}@{off}: handle carries the 0x5A magic")
+
+
+@unittest.skipUnless((CONTROL_DIR / "512 stereo tracks.ptx").exists(),
+                     "need the 512-stereo control to validate the deterministic re-key")
+class SynthStereoUnitTests(unittest.TestCase):
+    """`synth_stereo_unit`'s DETERMINISTIC re-key (name, lane indices, track #, the ten
+    element ids, the k/k-1 counters) must reproduce the real 512-control unit byte-for-byte
+    -- the property that lets the generator replace the library. Only the self-contained
+    GUID/blob are regenerated (PT needs them only present), so those sites are excluded."""
+
+    def test_deterministic_rekey_reproduces_512_unit(self) -> None:
+        lib512 = _load_path(CONTROL_DIR / "512 stereo tracks.ptx")
+        for k in (3, 9, 10, 30, 63):                       # both digit ranges
+            ref = BS.extract_track(lib512, k, 512, channels=2)
+            ref_blocks = BS._stereo_unit_blocks(ref)
+            M = BS._STEREO_MAP_1 if len(str(k)) == 1 else BS._STEREO_MAP_2
+            for key in BS._STEREO_UNIT_KEYS:
+                spec = M.get(key)
+                if spec is None:
+                    continue
+                buf = bytearray(ref_blocks[key])           # start from the REAL unit
+                o, w = spec["name"]
+                buf[o:o + w] = str(k).encode()
+                for off, wd, fn in spec["lin"]:
+                    buf[off:off + wd] = int(fn(k)).to_bytes(wd, "little")
+                self.assertEqual(bytes(buf), ref_blocks[key],
+                                 msg=f"k={k} {key}: deterministic re-key must equal the real unit")
 
 
 if __name__ == "__main__":

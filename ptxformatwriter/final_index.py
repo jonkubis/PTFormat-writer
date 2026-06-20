@@ -128,14 +128,17 @@ def parse_records(
         p += 4
         elements: list[Element] = []
         for _ in range(entry_count):
-            if final_block[p] != 0x01 or final_block[p + 2] != 0x00:
+            if final_block[p] != 0x01:
                 raise ValueError(
                     f"bad element tag at {p}: {final_block[p:p+5].hex()} "
                     f"(record type {content_type:#x} start {start})"
                 )
             k = _u16(final_block, p + 3)
             offsets = [_u32(final_block, p + 5 + 4 * i) for i in range(k)]
-            elements.append(Element(rel=p - start, tag1=final_block[p + 1], offsets=offsets))
+            # tag1 is a u16 (= 4 * offset count): the byte after 0x01 plus the next byte,
+            # which is its high byte (0x00 for < 64 offsets, nonzero at N>=64). Reading it as
+            # a single byte truncated the count and broke the index at >=64 tracks.
+            elements.append(Element(rel=p - start, tag1=_u16(final_block, p + 1), offsets=offsets))
             p += 4 * k + 11
         records.append(
             IndexRecord(
@@ -168,7 +171,7 @@ def serialize_record(record: IndexRecord) -> bytes:
         out += b"\x00\x00\x00"
     out += len(record.elements).to_bytes(4, "little")
     for element in record.elements:
-        out += bytes([0x01, element.tag1, 0x00])
+        out += bytes([0x01]) + element.tag1.to_bytes(2, "little")  # tag1 is u16 (= 4*offsets); >=64 needs the high byte
         out += len(element.offsets).to_bytes(2, "little")
         for offset in element.offsets:
             out += offset.to_bytes(4, "little")

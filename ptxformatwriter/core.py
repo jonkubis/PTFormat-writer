@@ -508,7 +508,11 @@ class PTFFormat:
         )
 
         childjump = 0
-        i = 1
+        # The 0x2624 track-list payload begins with a u32 track count; its low byte is
+        # 0x5A at 346 tracks (0x15A), which the byte-scan would otherwise mis-read as a
+        # phantom block (and cascade-corrupt the tree). Skip the [content_type:2][count:4]
+        # preamble so that count is never scanned -- the first real child is at +13.
+        i = 13 if content_type == 0x2624 else 1
         while i < block.block_size and pos + i + childjump < maxoffset:
             child = self.parse_block_at(pos + i, block)
             childjump = 0

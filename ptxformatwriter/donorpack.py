@@ -157,6 +157,63 @@ def write_inline_templates(control_root, out_path="ptxformatwriter/_templates.py
     return out
 
 
+_STEREO_SCAFFOLD_SRC = "lots of stereo tracks/8 stereo tracks.ptx"
+_STEREO_TEMPLATE_SRC = "lots of stereo tracks/512 stereo tracks.ptx"
+
+
+def write_stereo_data(control_root, out_path="ptxformatwriter/_stereo_data.py") -> Path:
+    """Regenerate `ptxformatwriter/_stereo_data.py` — the inlined assets that let
+    `body_synth.synthesize_stereo_inline` build N-stereo sessions with NO external control
+    files. Bundles an 8-track scaffold (base_n=8; its `0x261c` layout matches the 512) plus
+    the track-2 (single-digit) and track-10 (double-digit) per-track unit templates from the
+    512-track control. `synth_stereo_unit` re-keys these per index; the only fields it can't
+    derive (an 8-byte handle + a 160 B blob) are PT-confirmed self-contained (need only be
+    present). Run after re-authoring the source controls, then re-run the tests."""
+    import base64
+    import zlib
+    control_root = Path(control_root)
+    scaffold = W.load_unxored(str(control_root / _STEREO_SCAFFOLD_SRC))
+    lib512 = W.load_unxored(str(control_root / _STEREO_TEMPLATE_SRC))
+
+    def _ser(u) -> bytes:
+        blks = [u.b1014, u.b1052[0], u.b1052[1], u.b251a[0], u.b251a[1],
+                u.b210b, u.b261c, u.b2589, u.name_entry]
+        return b"".join(len(b).to_bytes(4, "little") + b for b in blks)
+
+    def _enc(b: bytes) -> str:
+        return base64.b64encode(zlib.compress(b, 9)).decode()
+
+    t1 = _ser(B.extract_track(lib512, 2, 512))     # 1-digit name template (tracks 1-9)
+    t2 = _ser(B.extract_track(lib512, 10, 512))    # 2-digit name template (tracks 10-99)
+    t3 = _ser(B.extract_track(lib512, 100, 512))   # 3-digit name template (tracks 100-512)
+    body = (
+        '"""GENERATED stereo-synthesis assets — inlined so N-stereo sessions build with NO external\n'
+        'control files. Regenerate via `donorpack.write_stereo_data(control_root)` after re-authoring the\n'
+        "source controls. Sources: '8 stereo tracks.ptx' (scaffold, base_n=8, Mac/512-compatible 0x261c\n"
+        "layout) + '512 stereo tracks.ptx' (track-2/10/100 = 1/2/3-digit unit templates, for tracks\n"
+        "1-9 / 10-99 / 100-512). The per-track GUID + 160 B blob are PT-confirmed self-contained.\"\"\"\n"
+        "import base64 as _b64, zlib as _z\n"
+        "from . import body_synth as _B\n\n"
+        f'_SCAFFOLD = "{_enc(scaffold)}"\n'
+        f'_TMPL1 = "{_enc(t1)}"\n'
+        f'_TMPL2 = "{_enc(t2)}"\n'
+        f'_TMPL3 = "{_enc(t3)}"\n\n'
+        "def _dec(s): return _z.decompress(_b64.b64decode(s))\n"
+        "def _unit(blob):\n"
+        "    o = 0; bs = []\n"
+        "    for _ in range(9):\n"
+        '        n = int.from_bytes(blob[o:o + 4], "little"); o += 4; bs.append(blob[o:o + n]); o += n\n'
+        "    return _B.StereoTrackUnit(b1014=bs[0], b1052=(bs[1], bs[2]), b251a=(bs[3], bs[4]),\n"
+        "                              b210b=bs[5], b261c=bs[6], b2589=bs[7], name_entry=bs[8])\n\n"
+        "def stereo_scaffold(): return _dec(_SCAFFOLD)          # 8-track Mac clean session (base_n=8)\n"
+        "def stereo_templates():                                # (1-digit, 2-digit, 3-digit)\n"
+        "    return _unit(_dec(_TMPL1)), _unit(_dec(_TMPL2)), _unit(_dec(_TMPL3))\n"
+    )
+    out = Path(out_path)
+    out.write_text(body)
+    return out
+
+
 class DonorPack:
     """A loaded donor pack. Use :meth:`controls` to get a `Controls` bundle."""
 

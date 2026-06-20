@@ -17,7 +17,14 @@ A worked end-to-end application — beatmap MIDI + audio stems → a finished se
 outside the library, in ``examples/beatmap_example.py``.
 """
 from . import body_synth, core, donorpack, wavecache, workbench, writer
-from .donorpack import Controls, DonorPack, build_pack, load_controls, write_inline_templates
+from .donorpack import (
+    Controls,
+    DonorPack,
+    build_pack,
+    load_controls,
+    write_inline_templates,
+    write_stereo_data,
+)
 from .core import (
     Block,
     MeterEvent,
@@ -38,6 +45,7 @@ __all__ = [
     "body_synth", "core", "donorpack", "wavecache", "workbench", "writer",
     # donor pack (bundle all donors into one regenerable file) + the donor bundle it yields
     "Controls", "DonorPack", "build_pack", "load_controls", "write_inline_templates",
+    "write_stereo_data",
     # core reader types
     "Block", "MeterEvent", "MidiEvent", "MidiPlacement", "PTFFormat",
     "PTFParseError", "Region", "TempoEvent", "Track", "Wav",
