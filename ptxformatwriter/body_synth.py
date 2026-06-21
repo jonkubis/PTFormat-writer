@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from .core import Block, PTFFormat
 from . import writer as W
 
-_NAME_RE = re.compile(rb"Audio (\d+)")
+_NAME_RE = re.compile(rb"(?:Audio|Click|MIDI) (\d+)")  # match every track-type name prefix
+                                                      # (final_index._NAME_RE already does)
 _TRACK_NAME = re.compile(rb"(?:Audio|Click|MIDI) \d+")
 
 
@@ -211,7 +212,10 @@ def _fix_name_table_special_last(data: bytes, n: int) -> bytes:
     encountered" (PT-confirmed root cause, 2026-06-19). This rebuilds the correct ordering.
 
     Size-preserving (normalize the stranded entry +2, specialize the true last -2), so it needs
-    no block-size or index fixup. Names are "Audio 1..n" at synthesis time (before any rename).
+    no block-size or index fixup. Names are "Audio/MIDI/Click 1..n" at synthesis time (before any
+    rename); entries are located by name match (`_NAME_RE`) rather than by a hardcoded prefix so
+    the fix applies to every track type — a fixed "Audio " search silently no-ops on MIDI/Click
+    and re-opens the stranded-special bug (PT-confirmed on a 9-MIDI build, 2026-06-20).
     Safe no-op if the entries aren't all present or the size would change."""
     ptf = parse(data)
     b2519 = _by_type(ptf, 0x2519)
@@ -221,14 +225,17 @@ def _fix_name_table_special_last(data: bytes, n: int) -> bytes:
     first_child = min(c.offset - 7 for c in b.child)
     start = b.offset
     region = data[start:first_child]
-    pref = [region.find(b"Audio " + str(k).encode()) - 4 for k in range(1, n + 1)]
+    matches = list(_NAME_RE.finditer(region))  # Audio/MIDI/Click <n> by name, any digit count
+    if len(matches) != n:
+        return data
+    pref = [m.start() - 4 for m in matches]  # entry start = name start - 4-byte length prefix
     if any(p < 4 for p in pref) or pref != sorted(pref):
         return data
     norm = []
-    for i, k in enumerate(range(1, n + 1)):
+    for i, m in enumerate(matches):
         end = pref[i + 1] if i + 1 < n else len(region)
         ent = region[pref[i] : end]
-        full = 33 + len(str(k))  # NORMAL entry = 4 (len) + (6 + digits) (name) + 23 (suffix)
+        full = 4 + (m.end() - m.start()) + _NAME_ENTRY_SUFFIX  # 4 (len) + name + 23 (suffix)
         ent = ent + b"\x00" * (full - len(ent)) if len(ent) < full else ent[:full]
         norm.append(ent)
     norm[-1] = norm[-1][:-2]  # last entry -> SPECIAL form
@@ -430,6 +437,180 @@ def synth_stereo_unit(k: int, tmpl1: "StereoTrackUnit", tmpl2: "StereoTrackUnit"
                            b261c=out["b261c"], b2589=out["b2589"], name_entry=out["name_entry"])
 
 
+# --- mono: same audio structure as stereo but ONE 0x1052 lane + channel index k-1 ----
+# Verified byte-exact vs extract_track(512-mono, k, channels=1) for k=2..511 (det-proof).
+# The element-id base 18871 is the 512-mono control's id pool; the invariant PT needs is the
+# +10/track, +1/slot stride (the absolute base is a free pool, rebuilt by the index).
+_MONO_UNIT_KEYS = ("b1014", "b1052_0", "b251a_0", "b251a_1", "b210b", "b261c", "b2589", "name_entry")
+
+
+def _mono_unit_blocks(u: "StereoTrackUnit") -> dict:
+    return {"b1014": u.b1014, "b1052_0": u.b1052[0], "b251a_0": u.b251a[0], "b251a_1": u.b251a[1],
+            "b210b": u.b210b, "b261c": u.b261c, "b2589": u.b2589, "name_entry": u.name_entry}
+
+
+def _mono_unit_map(digits: int) -> dict:
+    """Mono per-track patch sites (see _stereo_unit_map). One lane; channel index = k-1;
+    track number = k; ten u32 element-ids 10*k+18871+i; k/k-1 counters. b2589 is verbatim."""
+    s = digits - 1
+    eid = lambda i: (lambda k: 10 * k + 18871 + i)
+    return {
+        "b1014": {"name": (19, digits), "guid": [35 + s],
+                  "lin": [(25 + s, 2, lambda k: k - 1), (50 + s, 2, lambda k: k - 1)]},
+        "b1052_0": {"name": (19, digits), "lin": [], "guid": []},
+        "b251a_0": {"name": (21, digits), "guid": [32 + s, 54 + s], "lin": [(40 + s, 2, lambda k: k)]},
+        "b251a_1": {"name": (21, digits), "guid": [32 + s, 54 + s], "lin": [(40 + s, 2, lambda k: k)]},
+        "b210b": {"name": (23, digits), "guid": [32 + s], "lin": []},
+        "b261c": {"name": (46, digits), "guid": [58 + s, 74 + s, 176 + s], "blob": (1111 + s, 1271 + s),
+                  "lin": [(1026 + s + 4 * i, 4, eid(i)) for i in range(10)]
+                         + [(1298 + s, 2, lambda k: k - 1), (1304 + s, 2, lambda k: k - 1),
+                            (1482 + s, 2, lambda k: k), (1812 + s, 2, lambda k: k - 1)]},
+        "name_entry": {"name": (10, digits), "guid": [21 + s], "lin": [(29 + s, 2, lambda k: k)]},
+    }
+
+
+_MONO_MAP_1, _MONO_MAP_2, _MONO_MAP_3 = _mono_unit_map(1), _mono_unit_map(2), _mono_unit_map(3)
+
+
+def synth_mono_unit(k: int, tmpl1: "StereoTrackUnit", tmpl2: "StereoTrackUnit",
+                    tmpl3: "StereoTrackUnit", *, unique: bool = True) -> "StereoTrackUnit":
+    """Generate empty mono track `k`'s unit by re-keying a template (tmpl1/2/3 = 1/2/3-digit,
+    from a 512-mono control). Mono counterpart of `synth_stereo_unit`: one 0x1052 lane,
+    channels=1. Deterministic fields byte-identical to `extract_track(512_mono, k, channels=1)`;
+    handle + blob regenerated unique-per-track (and kept clear of the 0x5A magic) when `unique`."""
+    digits = len(str(k))
+    if digits > 3:
+        raise ValueError(f"synth_mono_unit supports tracks up to 999 (3-digit); got k={k}")
+    blocks = _mono_unit_blocks({1: tmpl1, 2: tmpl2, 3: tmpl3}[digits])
+    M = {1: _MONO_MAP_1, 2: _MONO_MAP_2, 3: _MONO_MAP_3}[digits]
+    no5a = lambda b: bytes(0x5B if x == 0x5A else x for x in b)
+    guid = no5a((0xE000 + k).to_bytes(2, "little"))
+    blob = no5a(bytes([0x00, 0xFF, 0x7F, 0x0A, 0x00]) + bytes((k * 131 + i * 97) & 0xFF for i in range(155)))
+    out = {}
+    for key in _MONO_UNIT_KEYS:
+        buf = bytearray(blocks[key])
+        spec = M.get(key)  # b2589 has no patch sites -> verbatim
+        if spec is not None:
+            o, w = spec["name"]
+            buf[o:o + w] = str(k).encode()
+            for off, wd, fn in spec["lin"]:
+                buf[off:off + wd] = int(fn(k)).to_bytes(wd, "little")
+            if unique:
+                for off in spec["guid"]:
+                    buf[off:off + 2] = guid
+                if "blob" in spec:
+                    a, b = spec["blob"]
+                    buf[a:b] = blob
+        out[key] = bytes(buf)
+    return StereoTrackUnit(b1014=out["b1014"], b1052=(out["b1052_0"],),
+                           b251a=(out["b251a_0"], out["b251a_1"]), b210b=out["b210b"],
+                           b261c=out["b261c"], b2589=out["b2589"], name_entry=out["name_entry"])
+
+
+# --- MIDI: its OWN block set (no 0x1014/0x1052/0x261c), channels=0 -------------------
+# Verified byte-exact vs the 8-MIDI control for k=2..8 (det-proof). Only SINGLE-DIGIT data
+# exists (the control has 8 tracks), so multi-digit names + the u8->u16 widening of the
+# track#/counter fields are EXTRAPOLATED and gated (raise) until a >=10-track MIDI control
+# confirms them. The MIDI unit is a dict (it does not fit the audio StereoTrackUnit).
+_MIDI_UNIT_KEYS = ("b1057", "b210b", "b2620", "b251a_0", "b251a_1", "b2589", "name_entry")
+
+
+def extract_midi_unit(data: bytes, k: int, total: int) -> dict:
+    """Extract MIDI track `k`'s unit (a dict of block bytes) from a `total`-MIDI control.
+    MIDI's per-track blocks: 0x1057 (parent 0x1058), 0x210b (0x2107), 0x2620 (the big
+    self-contained subtree, parent 0x2624), two lane-major 0x251a (parent 0x2519), 0x2589
+    (0x258a, count N-1), and the 0x2519 name entry. NO 0x1014/0x1052/0x261c."""
+    ptf = parse(data)
+    bt = lambda ct: sorted(_by_type(ptf, ct), key=lambda b: b.offset)
+    bb = lambda b: block_bytes(data, b)
+    b2519 = _by_type(ptf, 0x2519)[0]
+    fc = min(c.offset - 7 for c in b2519.child)
+    entries = _name_table_entries(data[b2519.offset:fc])
+    return {"b1057": bb(bt(0x1057)[k - 1]), "b210b": bb(bt(0x210b)[k - 1]),
+            "b2620": bb(bt(0x2620)[k - 1]), "b251a_0": bb(bt(0x251a)[k - 1]),
+            "b251a_1": bb(bt(0x251a)[total + (k - 1)]), "b2589": bb(bt(0x2589)[k - 2]),
+            "name_entry": entries[k - 1]}
+
+
+def _midi_unit_map(digits: int) -> dict:
+    """MIDI per-track patch sites (single-digit proven). Track number = k, k-1 counters; the
+    b2620 tail counter is addressed FROM the block END (its trailing u32-counted blob shifts
+    absolute offsets). b2589 + the random handles are verbatim. Widths stay u8 (single-digit)."""
+    s = digits - 1
+    return {
+        "b1057": {"name": (18, digits), "lin": []},
+        "b210b": {"name": (22, digits), "lin": []},
+        "b251a_0": {"name": (20, digits), "lin": [(39 + s, 1, lambda k: k)]},
+        "b251a_1": {"name": (20, digits), "lin": [(39 + s, 1, lambda k: k)]},
+        "b2620": {"name": (36, digits), "lin": [(183 + s, 1, lambda k: k - 1), (191 + s, 1, lambda k: k - 1),
+                  (448 + s, 1, lambda k: k), ("TAIL", 18, lambda k: k - 1)]},
+        "name_entry": {"name": (9, digits), "lin": [(28 + s, 1, lambda k: k)]},
+    }
+
+
+def synth_midi_unit(k: int, template: dict, *, unique: bool = True) -> dict:
+    """Generate MIDI track `k`'s unit (dict) by re-keying a single-digit MIDI `template`
+    (from `extract_midi_unit`). Deterministic fields byte-identical to the real unit; the
+    random handles + b2620 trailing blob are kept verbatim from the template (PT needs them
+    only present, and accepts duplicates). SINGLE-DIGIT ONLY (k <= 9)."""
+    if len(str(k)) > 1:
+        raise ValueError(
+            f"synth_midi_unit currently supports single-digit MIDI tracks (k <= 9); got k={k}. "
+            f"Multi-digit MIDI needs a >=10-track MIDI control (extrapolated map, gated).")
+    M = _midi_unit_map(1)
+    out = {}
+    for key in _MIDI_UNIT_KEYS:
+        buf = bytearray(template[key])
+        spec = M.get(key)  # b2589 -> verbatim
+        if spec is not None:
+            o, w = spec["name"]
+            buf[o:o + w] = str(k).encode()
+            for off, wd, fn in spec["lin"]:
+                pos, wid = (len(buf) - wd, 1) if off == "TAIL" else (off, wd)
+                buf[pos:pos + wid] = int(fn(k)).to_bytes(wid, "little")
+        out[key] = bytes(buf)
+    return out
+
+
+def grow_one_midi_track(data: bytes, base_n: int, unit: dict) -> bytes:
+    """Insert one empty MIDI track (-> base_n+1 tracks) into the body `data` (no final index).
+    `unit` is a MIDI unit dict (from `synth_midi_unit`/`extract_midi_unit`). MIDI adds 0 audio
+    channels (0x1054 unchanged). The MIDI counterpart of `grow_one_track`: its own block set
+    (0x1057, 0x2620, 0x210b, 0x251a x2 lane-major, 0x2589, name entry) appended after the last
+    instance in each parent. The MIDI INDEX side is `final_index.add_midi_track` (pass the track
+    index in `compose_index(..., midi_tracks=...)`)."""
+    n = base_n + 1
+    ptf = parse(data)
+    pm = _parent_zmarks(ptf)
+    ins: list[Insertion] = []
+
+    def append_after(block: Block, blob: bytes) -> None:
+        ins.append(Insertion(block.offset + block.block_size, blob, pm[block.offset - 7]))
+
+    append_after(_by_type(ptf, 0x1057)[-1], unit["b1057"])   # MIDI I/O (parent 0x1058)
+    append_after(_by_type(ptf, 0x2620)[-1], unit["b2620"])   # MIDI playlist subtree (parent 0x2624)
+    append_after(_by_type(ptf, 0x210b)[-1], unit["b210b"])
+    a51 = _by_type(ptf, 0x251a)                               # lane-major: lane0 mid-run, lane1 end
+    append_after(a51[base_n - 1], unit["b251a_0"])
+    append_after(a51[-1], unit["b251a_1"])
+    append_after(_by_type(ptf, 0x2589)[-1], unit["b2589"])   # overview (parent 0x258a, count N-1)
+
+    b2519 = _by_type(ptf, 0x2519)[0]                          # name entry before the first child
+    first_child = min(c.offset - 7 for c in b2519.child)
+    ins.append(Insertion(first_child, unit["name_entry"], b2519.offset - 7))
+
+    for b in _by_type(ptf, 0x202a):                          # ordinal append (u16 before fe ff)
+        s = b.offset - 7
+        seg = data[s : b.offset + b.block_size]
+        idx0 = seg.find(b"\xff\xff\xff\xff\x00\x00")
+        feff = seg.find(b"\xfe\xff", idx0 + 8)
+        ins.append(Insertion(s + feff, (n - 1).to_bytes(2, "little"), s))
+
+    body = bytearray(apply_insertions(data, ptf, ins))
+    _patch_counts(body, n, channel_count(bytes(body)))       # MIDI = 0 channels (no change to 0x1054)
+    return bytes(body)
+
+
 def add_click(data: bytes, clean_ref: bytes, click_ref: bytes) -> bytes:
     """Add the session's (single) click track to audio session `data` (full unxored
     bytes, body + index), placed as the LAST track, via the structural diff-replay in
@@ -439,9 +620,9 @@ def add_click(data: bytes, clean_ref: bytes, click_ref: bytes) -> bytes:
     audio-only session and the SAME session with a Click track added (e.g.
     `lots of stereo tracks/{N stereo tracks, N stereo plus click}.ptx`). The recursive
     diff between them isolates the click's exact contribution (playlist 0x261e + the
-    DigiClick plugin, the two overview 0x2589 entries, the per-track 0x200b chains, the
-    "Click 1" 0x2519 name entry, the 0x1018 "Click II" registry growth, and the session
-    DigiClick registration 0x2064); replaying it onto `data` adds the click.
+    click-plugin block, the two overview 0x2589 entries, the per-track 0x200b chains, the
+    "Click 1" 0x2519 name entry, the 0x1018 plugin-registry growth, and the session
+    click registration 0x2064); replaying it onto `data` adds the click.
 
     `clean_ref`'s audio LAYOUT must match `data`'s (same track count + types) so the
     diff's splice offsets line up with `data`'s blocks. This is the same kind of
@@ -495,7 +676,15 @@ def add_click_anyN(data: bytes, clean_ref: bytes, click_ref: bytes, at_top: bool
         d = set_track_names(d, canon)                                              # -> canonical
     spatch = _CC.derive_click_patch_structural(clean_ref, click_ref)
     out = _CC.apply_click_patch_structural(d, spatch, d)
-    out = move_click_to_top(out) if at_top else out
+    if at_top:
+        if any(t.kind == "midi" for t in track_types(out)):
+            # move_click_to_top's display list is audio-only (drops MIDI 0x2620); use the
+            # MIDI-aware index reorder to put the click first, rest in current display order.
+            cur = _container_display_offsets(out)        # [existing display..., Click]
+            tpo = {o: i for i, (o, _t) in enumerate(track_playlist_order(out))}
+            out = reorder_tracks(out, [tpo[o] for o in [cur[-1]] + cur[:-1]])
+        else:
+            out = move_click_to_top(out)
     if need_norm:                       # restore the caller's original audio-track names
         now = track_types(out)          # click is not an audio track; audio order is preserved
         anow = [i for i, t in enumerate(now) if t.kind in ("mono", "stereo")]
@@ -2092,12 +2281,27 @@ def move_click_to_top(data: bytes) -> bytes:
 
 def track_playlist_order(data: bytes) -> list[tuple[int, int]]:
     """The track playlists in body/creation order as (zmark_offset, content_type):
-    0x261c = audio, 0x261e = click. This is the list `reorder_tracks`'s `new_order`
-    indexes (index 0 = the first-created track, etc.). MIDI/bus playlists, if any,
-    are included by their playlist type."""
+    0x261c = audio, 0x261e = click, 0x2620 = MIDI. This is the list `reorder_tracks`'s
+    `new_order` indexes (index 0 = the first-created track, etc.). All track kinds share
+    one display-order list, so MIDI is included — its playlist is 0x2620."""
     fb = flat_blocks(parse(data))
     return sorted(((b.offset - 7, b.content_type) for b in fb
-                   if b.content_type in (0x261C, 0x261E)), key=lambda x: x[0])
+                   if b.content_type in (0x261C, 0x261E, 0x2620)), key=lambda x: x[0])
+
+
+def _container_display_offsets(data: bytes) -> list[int]:
+    """The track-playlist offsets in CURRENT display order — the 0x2624 count==1 container's
+    elements[1:] (what Pro Tools reads to order the edit window). For a freshly synthesized
+    session this equals build/spec order, which is NOT the same as `track_playlist_order`'s
+    body-offset order once MIDI is present (MIDI 0x2620 playlists cluster in the body away from
+    the interleaved audio 0x261c). Used to translate a spec/display-relative permutation into
+    `reorder_tracks`' body-offset index space."""
+    ref = _FI.final_index_ref(data)
+    zt, bt = _FI.block_layout(data)
+    for r in _FI.parse_records(ref.data, set(bt), set(zt)):
+        if r.content_type == 0x2624 and r.count == 1 and r.flag == 1:
+            return [e.offsets[0] for e in r.elements[1:] if e.offsets]
+    return []
 
 
 def reorder_tracks(data: bytes, new_order: list[int]) -> bytes:
@@ -2106,19 +2310,22 @@ def reorder_tracks(data: bytes, new_order: list[int]) -> bytes:
     e.g. [3,0,1,2] moves the 4th track to the top). Returns full unxored bytes
     (ready for `writer.encrypt_session_data`).
 
-    INDEX-ONLY: the edit-window order lives in the master-index playlist-order list
-    (the 0x2624 count==1 container's elements[1:] + each count==4 instance's
-    child_refs[1], with the instance childtype = the display-position playlist's kind
-    0x261c/0x261e). This sets that list to `new_order`; the body is left untouched
-    (Pro Tools sorts the edit window by this list, NOT by body block order). Works
-    for any track including the click at any position. PT-CONFIRMED (move-to-top,
-    reverse, click-to-middle)."""
+    INDEX-ONLY: the edit-window order is the entry order of the master track-list — the
+    0x2624 count==1 container's elements[1:] (one offset per track playlist, ALL kinds
+    interleaved). Pro Tools displays the tracks in that list order (document order, no sort).
+    This sets the list to `new_order`; the body is left untouched.
+    Each count==4 per-track playlist instance (audio/click only — MIDI has none) is keyed to
+    ITS OWN track: its ordinal = that track's display position; its back-pointer/childtype
+    stay its own playlist (a MIDI track interleaved between audio leaves a gap in the audio
+    instances' ordinals, e.g. 1,3 — exactly as a real PT save). Works for any mix of audio,
+    click, and MIDI at any position. PT-CONFIRMED (audio move-to-top/reverse, click-to-middle,
+    MIDI-anywhere structurally byte-matches the multiple-track-types controls)."""
     pls = track_playlist_order(data)
     if sorted(new_order) != list(range(len(pls))):
         raise ValueError(f"new_order must be a permutation of 0..{len(pls) - 1}; got {new_order}")
     target = [pls[i] for i in new_order]
     toff = [o for o, _t in target]
-    ttype = [t for _o, t in target]
+    pos_of = {o: i + 1 for i, (o, _t) in enumerate(target)}  # playlist offset -> 1-based display pos
     ref = _FI.final_index_ref(data)
     zt, bt = _FI.block_layout(data)
     recs = _FI.parse_records(ref.data, set(bt), set(zt))
@@ -2126,76 +2333,146 @@ def reorder_tracks(data: bytes, new_order: list[int]) -> bytes:
         if r.content_type == 0x2624 and r.count == 1 and r.flag == 1 and len(r.elements) >= 1 + len(toff):
             for i, off in enumerate(toff):
                 r.elements[1 + i].offsets = [off]
-        if r.content_type == 0x2624 and r.count == 4 and len(r.child_refs) >= 2 and 1 <= r.ordinal <= len(toff):
-            r.child_refs[1].offset = toff[r.ordinal - 1]
-            r.child_refs[0].child_type = ttype[r.ordinal - 1]
+        elif r.content_type == 0x2624 and r.count == 4 and len(r.child_refs) >= 2:
+            # Per-track playlist instance, keyed to its own track: set ordinal = that track's
+            # display position; keep its own back-pointer + childtype. Repointing by ordinal
+            # position instead (the old audio-only logic) would assign an audio instance a MIDI
+            # (0x2620) childtype where MIDI interleaves. Display order comes from the list above.
+            own = r.child_refs[1].offset
+            if own in pos_of:
+                r.ordinal = pos_of[own]
     return _set_index_offset(data[: ref.start] + _FI.serialize_final_block(recs))
 
 
 # --- track edit-window VIEW MODE (waveform vs volume) -------------------------
 #
-# A track's edit-window view is stored as a small block under TWO parents: the track's
-# display chain (parent 0x2015) and its overview entry (parent 0x2589). The block is
-# 0x203b (VOLUME view, 22 B) or 0x2038 (WAVEFORM view, 19 B) — a 0x2037 child plus a
-# trailer (volume carries an extra `01 00 00 00`; waveform just `00`). PT renders the
-# track in whichever these encode. (Real volume-AUTOMATION lanes are also 0x203b but sit
-# under 0x2580 — those are left alone.) The click splice (`add_click_anyN`) can leave a
-# track's view blocks as volume — PT-confirmed it mis-assigns volume to the 3rd-displayed
-# track — so generated sessions run this to force every track back to waveform.
+# A track's edit-window view is a small block whose CONTENT_TYPE *is* the view mode:
+# 0x203b = VOLUME (22 B), 0x2038 = WAVEFORM (19 B), 0x203a = MIDI (no waveform/volume). The
+# 0x2037 child is that view block's payload, and the volume form carries an extra trailer
+# `01 00 00 00` vs waveform's `00`. The catch: a track's view block appears MANY times — in
+# its overview/display chains AND, crucially, EMBEDDED inside its own playlist block (0x261c
+# audio / 0x261e click), nested 0x200d->0x200a->0x2015->0x203b. The BLOCK PARSER does NOT
+# descend into the playlist payload, so the parser-tree never even sees those embedded view
+# blocks — which is exactly where the click splice leaves VOLUME view.
+#
+# The click splice (`add_click_anyN`) replays a click control that was saved in volume view,
+# so the click's 0x261e playlist embeds 4 VOLUME view blocks (its embedded view sequence is
+# VVVVVWVW vs a normal audio playlist's WWVVWWWW). Pro Tools renders the click track —
+# wherever it lands in the display order — in volume view. (The edit window is ordered by the
+# master index's display list, so the click sits at display position 3 in a 'bottom' build and
+# that audible row shows volume; in 'top' a MIDI track sits there and has no waveform/volume
+# view, hiding the bug — but the same 4 volume bytes are present.)
+#
+# THE TWO V's THAT MUST STAY: every audio playlist (incl. the fine no-click session) also
+# embeds 2 VOLUME blocks that belong to real 0x2580 volume-AUTOMATION lanes — those render
+# fine and MUST be left alone. The discriminator: a genuine automation VOLUME block's
+# immediate parent is its 0x2580 automation-lane block; a view-volume block's immediate parent
+# is its display chain (0x2015 / 0x200a / 0x2589). So we convert every 0x203b whose immediate
+# parent is NOT 0x2580.
+#
+# Because the targets live in playlist payload the parser can't reach, set_waveform_view
+# works by RAW byte scan + a raw recursive block-bounds walk (not the parser tree), then
+# shrinks every enclosing block (-3 B each) and repairs the master index. No-op on an
+# already-waveform session; idempotent. Generated sessions run this LAST (after the splice).
 _VIEW_VOLUME = bytes.fromhex("5a01000f0000003b205a010002000000372001000000")    # 0x203b, 22 B
 _VIEW_WAVEFORM = bytes.fromhex("5a01000c00000038205a010002000000372000")        # 0x2038, 19 B
-_VIEW_PARENTS = (0x2015, 0x2589)   # track display chain + overview entry (NOT 0x2580 automation)
+
+
+def _raw_block_bounds(data: bytes, end0: int) -> "list[tuple[int, int, int]]":
+    """Every block in `data[:end0]` as (zmark, end, content_type), found by a RAW
+    recursive descent over the 0x5A framing (header = 5A <type:2> <size:4> <ct:2>;
+    block spans [zmark, zmark+7+size)). Unlike the parser, this descends into EVERY
+    block — including playlist payloads (0x261c/0x261e) the parser treats as opaque —
+    so the deep embedded view chain (0x200d->0x200a->0x2015->0x203b) is reachable."""
+    out: list[tuple[int, int, int]] = []
+
+    def descend(lo: int, hi: int) -> None:
+        pos = lo
+        while pos < hi:
+            if data[pos] == 0x5A:
+                block_type = int.from_bytes(data[pos + 1 : pos + 3], "little")
+                if not (block_type & 0xFF00):
+                    size = int.from_bytes(data[pos + 3 : pos + 7], "little")
+                    ct = int.from_bytes(data[pos + 7 : pos + 9], "little")
+                    end = (pos + 7) + size
+                    if size > 0 and end <= hi:
+                        out.append((pos, end, ct))
+                        descend(pos + 9, end)   # children begin after the ct word
+                        pos = end
+                        continue
+            pos += 1
+
+    descend(0, end0)
+    return out
+
+
+def _view_volume_offsets(data: bytes, end0: int,
+                         bounds: "list[tuple[int, int, int]] | None" = None) -> "list[int]":
+    """Offsets of every _VIEW_VOLUME (0x203b, 22 B) signature in `data[:end0]` that is a
+    track-VIEW block, NOT a real 0x2580 volume-AUTOMATION lane. Discriminator (exact, parent-
+    based): the IMMEDIATE enclosing block of an automation VOLUME is its 0x2580 automation lane;
+    a view VOLUME's immediate parent is its display chain (0x2015 / 0x200a / 0x2589).
+    `bounds` = `_raw_block_bounds(data, end0)` (computed if not supplied)."""
+    if bounds is None:
+        bounds = _raw_block_bounds(data, end0)
+    out: list[int] = []
+    pos = 0
+    while True:
+        j = data.find(_VIEW_VOLUME, pos)
+        if j < 0 or j >= end0:
+            break
+        pos = j + 1
+        # immediate parent = the strict container with the largest zmark (excludes the 0x203b itself)
+        parent_ct = None
+        best_z = -1
+        for z, end, ct in bounds:
+            if z < j and end >= j + len(_VIEW_VOLUME) and z > best_z:
+                best_z, parent_ct = z, ct
+        if parent_ct != 0x2580:   # 0x2580 = volume-automation lane (leave alone); else a view block
+            out.append(j)
+    return out
 
 
 def set_waveform_view(data: bytes) -> bytes:
-    """Force every track's edit-window view to WAVEFORM.
+    """Force every track's edit-window VIEW to WAVEFORM (leaving real 0x2580 volume
+    automation alone), then repair block sizes and the master index.
 
-    PT stores a track's view as a 0x203b (volume, 22 B) / 0x2038 (waveform, 19 B) block under
-    the track display chain (0x2015) and the overview entry (0x2589). This converts every such
-    VOLUME block to WAVEFORM (leaving real 0x2580 volume-automation lanes untouched), fixes the
-    containing block sizes (-3 B each), and repairs the master index. Byte-for-byte the same
-    edit PT writes when you switch a track to waveform view. No-op on an already-waveform
-    session. The click splice can leave the 3rd-displayed track in volume view, so the build
-    runs this last. Returns full unxored bytes."""
-    ptf = parse(data)
-    par: dict[int, "int | None"] = {}
-    ctype: dict[int, int] = {}
-
-    def _rec(b: Block, p: "int | None") -> None:
-        z = b.offset - 7
-        par[z] = p
-        ctype[z] = b.content_type
-        for c in sorted(b.child, key=lambda x: x.offset):
-            _rec(c, z)
-
-    for b in sorted(ptf.blocks, key=lambda x: x.offset):
-        _rec(b, None)
-    targets = [z for z, ct in ctype.items()
-               if ct == 0x203b and ctype.get(par[z]) in _VIEW_PARENTS
-               and data[z : z + len(_VIEW_VOLUME)] == _VIEW_VOLUME]
+    A track's view is the content_type of its view block: 0x203b = VOLUME (22 B),
+    0x2038 = WAVEFORM (19 B). These are embedded inside the track's playlist block
+    (0x261c/0x261e), nested too deep for the block parser to reach, so we scan RAW bytes
+    for the 0x203b view signature, convert each to the 0x2038 waveform signature (-3 B),
+    shrink every enclosing block by 3 (via a raw recursive bounds walk), and recompute the
+    index offsets. The 2 VOLUME blocks on every audio playlist that belong to real 0x2580
+    automation lanes are detected by their preceding 0x2580 header and left untouched.
+    Byte-for-byte the same edit PT writes when you switch a track to waveform view. No-op
+    on an already-waveform session; idempotent. The build runs this LAST, after the click
+    splice (which is what introduces the volume view). Returns full unxored bytes."""
+    ref = _FI.final_index_ref(data)
+    if ref is None:
+        return data
+    idx_start = ref.start
+    bounds = _raw_block_bounds(data, idx_start)        # raw framing; reused for discriminate + fixup
+    targets = _view_volume_offsets(data, idx_start, bounds)
     if not targets:
         return data
     delta = len(_VIEW_WAVEFORM) - len(_VIEW_VOLUME)   # -3 per converted block
-    ref = _FI.final_index_ref(data)
-    idx_start = ref.start
     _r, holes = _FI.offset_holes(data)
     body = bytearray(data[:idx_start])
     index = data[idx_start:]
-    # shrink every ANCESTOR of each converted block by |delta| (walk the actual parent chain —
-    # the view block nests deep: 0x261c->0x200b->0x200a->0x2015->0x203b, every level must shrink)
+    # shrink every block that STRICTLY contains a target (raw bounds — the ancestors include
+    # the hidden 0x261e->0x200d->0x200a->0x2015 chain the parser never descends into).
     size_delta: dict[int, int] = {}
-    for z in targets:
-        a = par[z]
-        while a is not None:
-            size_delta[a] = size_delta.get(a, 0) + delta
-            a = par[a]
-    for a, dz in size_delta.items():
-        sp = a + 3
+    for off in targets:
+        for z, end, _ct in bounds:
+            if z < off and end >= off + len(_VIEW_VOLUME):   # strict container (z != off)
+                size_delta[z] = size_delta.get(z, 0) + delta
+    for z, dz in size_delta.items():
+        sp = z + 3
         sz = int.from_bytes(body[sp : sp + 4], "little")
         body[sp : sp + 4] = (sz + dz).to_bytes(4, "little")
     # splice high->low so lower offsets stay valid
-    for z in sorted(targets, reverse=True):
-        body[z : z + len(_VIEW_VOLUME)] = _VIEW_WAVEFORM
+    for off in sorted(targets, reverse=True):
+        body[off : off + len(_VIEW_VOLUME)] = _VIEW_WAVEFORM
     out = bytearray(bytes(body) + index)
     new_index_start = len(body)
     _z2t, by_type = _FI.block_layout(bytes(out))
@@ -2606,6 +2883,47 @@ def _folder_leaf(data: bytes) -> str | None:
     return best_chain[-1] if best_chain else None
 
 
+def _internal_channel_order(data: bytes) -> list[int]:
+    """Channel count of each track in INTERNAL (lane) order: 1=mono, 2=stereo, 0=MIDI.
+    Internal order is NOT display order when MIDI is present (a `multiple track types`
+    control is internal [mono, MIDI, stereo] = [1, 0, 2] but displays [mono, stereo,
+    MIDI]). Derived from the lane-0 0x251a blocks (one per track, in lane order) keyed
+    to the 0x1052 audio-lane count per track name; a MIDI track has no 0x1052 -> 0."""
+    ptf = parse(data)
+    a51 = _by_type(ptf, 0x251a)
+    base_n = len(a51) // 2
+    ch_by_name: dict[str, int] = {}
+    for b in _by_type(ptf, 0x1052):
+        blk = data[b.offset - 7 : b.offset + b.block_size]
+        m = _NAME_RE.search(blk)
+        if m:
+            ch_by_name[m.group().decode()] = ch_by_name.get(m.group().decode(), 0) + 1
+    order: list[int] = []
+    for b in a51[:base_n]:
+        blk = data[b.offset - 7 : b.offset + b.block_size]
+        m = _NAME_RE.search(blk)
+        order.append(ch_by_name.get(m.group().decode(), 0) if m else 0)
+    return order
+
+
+def _lane_order_track_names(body: bytes, n: int) -> list[str]:
+    """Per-track names in LANE order — the order `_fill_offsets` assigns track k
+    (it counts lane-major 0x251a instances 1..N). Read each track's name from the
+    first `n` 0x251a lane blocks' own bytes rather than assuming a naming scheme:
+    a `multiple track types` donor names per-type ("Audio 1", "MIDI 1", "Audio 2"
+    in lane order), so the index must resolve "MIDI 1" at lane position 2, not a
+    global "MIDI 3". Lane-major layout is [N lane-0 blocks][N lane-1 blocks], so the
+    first N carry one name each (track k's name)."""
+    ptf = parse(body)
+    lanes = _by_type(ptf, 0x251a)[:n]
+    names: list[str] = []
+    for b in lanes:
+        blk = body[b.offset - 7 : b.offset + b.block_size]
+        m = _NAME_RE.search(blk)
+        names.append(m.group().decode() if m else f"Audio {len(names) + 1}")
+    return names
+
+
 def synthesize_mixed_session(
     specs: list[int],
     donor_data: bytes,
@@ -2615,17 +2933,29 @@ def synthesize_mixed_session(
     target_leaf: str | None = None,
     click_ref: tuple[bytes, bytes] | None = None,
     stereo_unit_fn: "callable | None" = None,
+    mono_unit_fn: "callable | None" = None,
+    midi_unit_fn: "callable | None" = None,
 ) -> bytes:
-    """Synthesize a session with an arbitrary mix of mono (1ch) and stereo (2ch)
-    audio tracks, in the given order — optionally with a Click track appended last.
+    """Synthesize a session with an arbitrary mix of mono (1ch), stereo (2ch), and
+    MIDI (0ch) tracks, in the given INTERNAL (grow/lane) order — optionally with a
+    Click track appended last.
 
-    `specs`         per-track channel counts (1 or 2), in display order. len == N.
-    `donor_data`    a session whose first `base_n` tracks already match `specs`
-                    (base_n = its track count, must be >= 2 — the 1->2 grow has no
-                    0x2589 anchor). The four 2-track donors exist as controls
-                    (`2 mono`, `2 stereo`, `mono stereo`, `stereo mono`).
+    `specs`         per-track channel counts (1=mono, 2=stereo, 0=MIDI), in INTERNAL
+                    (lane/grow) order. len == N. NOTE: internal order is NOT the same
+                    as display order when MIDI is present (Pro Tools stores a separate
+                    overview permutation); pass `overview_order` for a specific display.
+    `donor_data`    a session whose first `base_n` tracks already match `specs` in
+                    internal order (base_n = its track count, must be >= 2 — the 1->2
+                    grow has no 0x2589 anchor). Audio-only: the four 2-track controls
+                    (`2 mono`, `2 stereo`, `mono stereo`, `stereo mono`). Audio+MIDI:
+                    a `multiple track types` control (internal order [mono, MIDI,
+                    stereo] = [1, 0, 2]); MIDI cannot be grown into an audio-only body
+                    (`grow_one_midi_track` needs the MIDI containers to already exist).
     `mono_lib`/`stereo_lib`  (data, total) uniform controls (>= N tracks) to source
                     each added track's unit from, by track index.
+    `midi_unit_fn`  generates a MIDI track unit for internal position k (e.g.
+                    `lambda k: synth_midi_unit(k, template)`). Required iff `specs`
+                    contains a 0 beyond `base_n`; MIDI tracks are gated single-digit.
     `overview_order`  the N-track display-order permutation. The order is COSMETIC
                     (Pro Tools accepts any valid permutation of 0..N-1 — confirmed),
                     so it defaults to identity `[0..N-1]`; no matching control is
@@ -2663,14 +2993,28 @@ def synthesize_mixed_session(
     body = donor_data[: _FI.final_index_ref(donor_data).start]
     for k in range(base_n + 1, n + 1):
         ch = specs[k - 1]
+        if ch == 0:
+            # MIDI: its own block set, 0 channels. Must be FIRST + `continue` — the audio
+            # `else` below would otherwise grow a 0-channel spec as a stereo track. No
+            # 0x1014 channel-map fixup (MIDI has no 0x1014); grow_one_midi_track does the
+            # lane/ordinal/name bookkeeping. base_n=k-1 is the CURRENT track count so the
+            # lane-major 0x251a insert lands at the right boundary (see grow_one_midi_track).
+            if midi_unit_fn is None:
+                raise ValueError(f"specs has a MIDI track (0) at internal position {k} "
+                                 f"but no midi_unit_fn was given")
+            body = grow_one_midi_track(body, k - 1, midi_unit_fn(k))
+            continue
         if ch == 2 and stereo_unit_fn is not None:
             unit = stereo_unit_fn(k)  # library-free: generate the unit (see synth_stereo_unit)
+        elif ch == 1 and mono_unit_fn is not None:
+            unit = mono_unit_fn(k)    # library-free mono (see synth_mono_unit)
         else:
             lib, total = (mono_data, mono_total) if ch == 1 else (stereo_data, stereo_total)
             unit = extract_track(lib, k, total, channels=ch)
         body = grow_one_track(body, k - 1, unit)
         # Rewrite the just-added track's channel map to the cumulative allocation
-        # (its unit carries the source control's channel numbers).
+        # (its unit carries the source control's channel numbers). MIDI's 0 contributes
+        # nothing to `base`, so audio channel allocation stays contiguous across MIDI.
         base = sum(specs[: k - 1])
         new_1014 = _by_type(parse(body), 0x1014)[-1]
         body = set_track_channels(body, new_1014.offset, list(range(base, base + ch)))
@@ -2692,14 +3036,31 @@ def synthesize_mixed_session(
         body = _fix_name_table_special_last(body, n)
 
     body = bytearray(body)
-    _set_overview_order(body, overview_order)
+    # The overview display-order anchor (0x2587 cache) exists once per AUDIO track only —
+    # MIDI tracks carry no anchor. So with MIDI present the anchor count is #audio, not N,
+    # and `_set_overview_order(body, [0..N-1])` would mismatch. The order is cosmetic (PT
+    # rebuilds the 0x2587 cache), so set an identity permutation over exactly the anchors
+    # that exist; audio-only keeps the caller's `overview_order` unchanged.
+    n_anchors = len(_overview_order_offsets(bytes(body)))
+    _set_overview_order(body, overview_order if n_anchors == n else list(range(n_anchors)))
     _set_overview_extent(body, 0)  # TODO: non-zero threshold once tracks overflow the window (N>9)
     _set_track_selection(body, None)
     body = bytearray(_clear_donor_window_markers(bytes(body), base_n))
     body = bytes(body)
 
     donor_index = donor_data[_FI.final_index_ref(donor_data).start :]
-    index = _FI.compose_index(donor_data, body + donor_index, base_n, n, channels=specs)
+    midi_positions = {k for k in range(1, n + 1) if specs[k - 1] == 0}
+    if midi_positions:
+        # MIDI tracks need name-keyed index resolution (the 0x2519 table/parent reference
+        # each track's 0x251a lanes by name). Derive the per-track names in lane order
+        # straight from the body so they match exactly — the donor uses PER-TYPE naming
+        # (e.g. "MIDI 1" at internal position 2), which assuming a global scheme would miss.
+        track_names = _lane_order_track_names(body, n)
+        index = _FI.compose_index(donor_data, body + donor_index, base_n, n,
+                                  channels=specs, track_names=track_names,
+                                  midi_tracks=midi_positions)
+    else:
+        index = _FI.compose_index(donor_data, body + donor_index, base_n, n, channels=specs)
     out = _set_index_offset(body + index)
 
     # Path-normalize the ADDED tracks' source-folder leaf -> the donor's leaf, so
@@ -2781,10 +3142,207 @@ def synthesize_stereo_inline(n: int, *, scaffold: "bytes | None" = None,
     t1, t2, t3 = _SD.stereo_templates()
     # stereo_lib here serves ONLY as the path-leaf source + a non-matching total (so the
     # name table is rebuilt, not transplanted); the units come from `stereo_unit_fn`.
-    return synthesize_mixed_session(
+    out = synthesize_mixed_session(
         [2] * n, scaffold, (b"", 0), (scaffold, n + 1),
         stereo_unit_fn=lambda k: synth_stereo_unit(k, t1, t2, t3, unique=unique),
     )
+    return set_waveform_view(out)  # force every track's edit-window view to waveform
+
+
+def synthesize_mono_inline(n: int, *, scaffold: "bytes | None" = None,
+                           unique: bool = True) -> bytes:
+    """Build a clean `n`-mono session with NO external control files — the mono counterpart
+    of `synthesize_stereo_inline`. Inlines an 8-track mono scaffold + the 512-mono unit
+    templates (`_mono_data`) and generates tracks via `synth_mono_unit`. Range: 8 <= n <=
+    `_STEREO_INLINE_MAX`. Because the scaffold and templates come from different folders, the
+    generated units' embedded folder leaf is normalized to the scaffold's (no path chimera)."""
+    from . import _mono_data as _MD
+    if scaffold is None:
+        scaffold = _MD.mono_scaffold()
+    base_n = len(track_types(scaffold))
+    if n < base_n:
+        raise ValueError(f"synthesize_mono_inline needs n >= {base_n} (the inlined scaffold's "
+                         f"track count); got n={n}. Use a bundled control for n < {base_n}.")
+    if n > _STEREO_INLINE_MAX:
+        raise ValueError(f"synthesize_mono_inline supports n <= {_STEREO_INLINE_MAX} (the "
+                         f"0x5A-in-data scan limit); got n={n}.")
+    t1, t2, t3 = _MD.mono_templates()
+    out = synthesize_mixed_session(
+        [1] * n, scaffold, (scaffold, n + 1), (b"", 0),
+        mono_unit_fn=lambda k: synth_mono_unit(k, t1, t2, t3, unique=unique),
+    )
+    # The generated units carry the 512-mono templates' folder leaf; normalize it to the
+    # scaffold's leaf so the session is not a path chimera Pro Tools would reject.
+    tl, sl = _MD.TEMPLATE_LEAF, _folder_leaf(scaffold)
+    if tl and sl and tl != sl and track_name_occurrences(out, tl):
+        out = rename_track(out, tl, sl)
+    return set_waveform_view(out)
+
+
+def synthesize_mixed_inline(spec: "list[int]", *, unique: bool = True) -> bytes:
+    """Build a clean mono+stereo session in ARBITRARY ORDER with NO external control files.
+
+    `spec` = per-track channel counts in display order (1 = mono, 2 = stereo). Picks a 2-track
+    start-pair donor matching `spec[:2]` (the grow anchor) and generates every remaining track
+    from the inlined stereo/mono unit templates via `synth_stereo_unit`/`synth_mono_unit`. The
+    cumulative channel allocation + index are handled by `synthesize_mixed_session`; both
+    template folder leaves are normalized to the donor's. Range: 2 <= len(spec) <=
+    `_STEREO_INLINE_MAX`. (Click + MIDI are added by the higher-level `synthesize`.)"""
+    from . import _stereo_data as _SD, _mono_data as _MD, _mixed_data as _XD
+    n = len(spec)
+    if n < 2:
+        raise ValueError(f"synthesize_mixed_inline needs >= 2 tracks (the grow anchor); got {n}.")
+    if any(c not in (1, 2) for c in spec):
+        raise ValueError("spec entries must be 1 (mono) or 2 (stereo).")
+    if n > _STEREO_INLINE_MAX:
+        raise ValueError(f"synthesize_mixed_inline supports <= {_STEREO_INLINE_MAX} tracks "
+                         f"(the 0x5A-in-data scan limit); got {n}.")
+    pair = (spec[0], spec[1])
+    if pair not in _XD.start_pairs():
+        raise ValueError(f"no inlined donor for start pair {pair}; need one of {_XD.start_pairs()}.")
+    donor = _XD.mixed_donor(*pair)
+    st = _SD.stereo_templates()
+    mt = _MD.mono_templates()
+    out = synthesize_mixed_session(
+        spec, donor, (donor, n + 1), (donor, n + 1),
+        mono_unit_fn=lambda k: synth_mono_unit(k, *mt, unique=unique),
+        stereo_unit_fn=lambda k: synth_stereo_unit(k, *st, unique=unique),
+    )
+    dl = _folder_leaf(donor)  # normalize BOTH template leaves to the donor's
+    for tl in (_XD.STEREO_TEMPLATE_LEAF, _XD.MONO_TEMPLATE_LEAF):
+        if tl and dl and tl != dl and track_name_occurrences(out, tl):
+            out = rename_track(out, tl, dl)
+    return set_waveform_view(out)
+
+
+_TYPE_NAME_PREFIX = {"mono": "Audio", "stereo": "Audio", "midi": "MIDI", "click": "Click"}
+
+
+def _renumber_tracks_per_type(data: bytes) -> bytes:
+    """Renumber tracks to clean per-type counters (Audio 1..A, MIDI 1..M) so grown tracks don't
+    show internal-position gaps (e.g. the global-position naming leaves Audio 1,2,4,6 / MIDI 1,5).
+    Numbers each type 1..k in `track_types` order (audio-grouped, internal order within a type),
+    which renders as gap-free top-to-bottom numbering. Collision-free in that order: the i-th
+    track of a type targets "<T> i", and any track currently holding that name has a lower rank
+    and was already renamed, so `set_track_names`' sequential `rename_track` never duplicates."""
+    tts = track_types(data)
+    counts: dict[str, int] = {}
+    targets: list[str | None] = []
+    for t in tts:
+        pre = _TYPE_NAME_PREFIX.get(t.kind)
+        if pre is None:
+            targets.append(None)
+            continue
+        counts[pre] = counts.get(pre, 0) + 1
+        targets.append(f"{pre} {counts[pre]}")
+    return set_track_names(data, targets)
+
+
+def synthesize_mixed_midi(
+    spec: "list[int]",
+    donor_data: bytes,
+    midi_template: dict,
+    *,
+    overview_order: "list[int] | None" = None,
+    unique: bool = True,
+) -> bytes:
+    """Build a mono+stereo+MIDI session in INTERNAL (grow/lane) order from a multi-type donor.
+
+    `spec`          per-track channel counts in INTERNAL order (1=mono, 2=stereo, 0=MIDI).
+                    `spec[:base_n]` MUST match the donor's internal track types (MIDI can't be
+                    grown into an audio-only body — `grow_one_midi_track` needs the donor's MIDI
+                    containers to already exist). Internal order differs from display order when
+                    MIDI is present; the display permutation is cosmetic (PT rebuilds it).
+    `donor_data`    a `multiple track types` control (internal order [mono, MIDI, stereo] =
+                    [1, 0, 2], base_n=3) carrying both audio AND MIDI infrastructure.
+    `midi_template` an `extract_midi_unit(...)` dict from a uniform MIDI control (e.g.
+                    `8 MIDI tracks.ptx`); each grown MIDI track is re-keyed via `synth_midi_unit`
+                    (single-digit gated, so a grown MIDI track must sit at internal position <=9).
+
+    Audio units come from the inlined `_stereo_data`/`_mono_data` templates; their folder leaves
+    are normalized to the donor's (MIDI units carry no path, so no MIDI leaf to fix). Returns full
+    unxored bytes (ready for `writer.encrypt_session_data`)."""
+    from . import _stereo_data as _SD, _mono_data as _MD, _mixed_data as _XD
+    n = len(spec)
+    base_n = len(track_types(donor_data))
+    donor_internal = _internal_channel_order(donor_data)
+    if spec[:base_n] != donor_internal:
+        raise ValueError(f"spec[:{base_n}] must match the donor's internal order "
+                         f"{donor_internal} (MIDI can't be grown from scratch); got {spec[:base_n]}")
+    midi_beyond = [k for k in range(base_n + 1, n + 1) if spec[k - 1] == 0]
+    if any(k > 9 for k in midi_beyond):
+        raise ValueError(f"grown MIDI tracks must sit at internal position <= 9 (single-digit "
+                         f"gate); got positions {midi_beyond}")
+    st = _SD.stereo_templates()
+    mt = _MD.mono_templates()
+    out = synthesize_mixed_session(
+        spec, donor_data, (donor_data, n + 1), (donor_data, n + 1),
+        overview_order=overview_order,
+        stereo_unit_fn=lambda k: synth_stereo_unit(k, *st, unique=unique),
+        mono_unit_fn=lambda k: synth_mono_unit(k, *mt, unique=unique),
+        midi_unit_fn=lambda k: synth_midi_unit(k, midi_template, unique=unique),
+    )
+    dl = _folder_leaf(donor_data)  # normalize the audio template leaves to the donor's
+    for tl in (_XD.STEREO_TEMPLATE_LEAF, _XD.MONO_TEMPLATE_LEAF):
+        if tl and dl and tl != dl and track_name_occurrences(out, tl):
+            out = rename_track(out, tl, dl)
+    # Grown tracks are named by internal position (gaps: Audio 1,2,4,6 / MIDI 1,5); renumber to
+    # clean per-type counters (Audio 1..A / MIDI 1..M) as a hand-built PT session would read.
+    out = _renumber_tracks_per_type(out)
+    return set_waveform_view(out)
+
+
+def synthesize_mixed_midi_inline(spec: "list[int]", *, unique: bool = True) -> bytes:
+    """Build a mono+stereo+MIDI session with NO external control files — the MIDI counterpart of
+    `synthesize_mixed_inline`. Inlines the `multiple track types` donor + the MIDI unit template
+    (`_mixed_midi_data`) and delegates to `synthesize_mixed_midi`. `spec` is INTERNAL order and
+    `spec[:3]` must be `[1, 0, 2]` (the donor's internal [mono, MIDI, stereo]); grown MIDI tracks
+    must sit at internal position <= 9 (single-digit gate). Display order is cosmetic."""
+    from . import _mixed_midi_data as _MM
+    return synthesize_mixed_midi(spec, _MM.mixed_midi_donor(), _MM.midi_template(), unique=unique)
+
+
+def synthesize(spec: "list[int]", *, click: "str | None" = None,
+               display_order: "list[int] | None" = None, unique: bool = True) -> bytes:
+    """Build a Pro Tools session from an ordered track spec with NO external control files.
+
+    `spec` = per-track channel counts (1 = mono, 2 = stereo, 0 = MIDI). A spec containing MIDI (0)
+    is built in INTERNAL order and must start `[1, 0, 2]` (the inlined multi-type donor's [mono,
+    MIDI, stereo]) with grown MIDI at internal position <= 9.
+    `display_order` sets the edit-window track order independently of build order: a permutation of
+    0..N-1 over the built tracks in spec/creation order (e.g. `synthesize([1, 0, 2], display_order=
+    [2, 0, 1])` builds mono/MIDI/stereo then DISPLAYS stereo, mono, MIDI). Index-only — Pro Tools'
+    loader orders the edit window by the master track-list, not body order, so this is how MIDI can
+    sit anywhere in the display. None = display in build order.
+    `click` adds a single Click track: None, 'top', or 'bottom' — works with audio AND MIDI. For a
+    click at an arbitrary position, add it then pass `display_order` over the N+1 resulting tracks
+    (the click is the last build index). Range 2..418 tracks. Returns full unxored bytes."""
+    n = len(spec)
+    has_midi = any(c == 0 for c in spec)
+    if all(c == 2 for c in spec) and n >= 8:
+        body = synthesize_stereo_inline(n, unique=unique)
+    elif all(c == 1 for c in spec) and n >= 8:
+        body = synthesize_mono_inline(n, unique=unique)
+    elif has_midi:
+        body = synthesize_mixed_midi_inline(spec, unique=unique)
+    else:
+        body = synthesize_mixed_inline(spec, unique=unique)
+    if click is not None:
+        if click not in ("top", "bottom"):
+            raise ValueError("click must be None, 'top', or 'bottom'.")
+        from . import _click_data as _CD
+        clean, clk = _CD.click_pair()
+        # The click splice can leave a track in volume view; force waveform LAST (the docstring's
+        # "run this last" rule). body was already waveform from the inline synthesizer.
+        body = set_waveform_view(add_click_anyN(body, clean, clk, at_top=(click == "top")))
+    if display_order is not None:
+        # Index-only edit-window reorder (no body change). `display_order` indexes the build/spec
+        # order; translate to reorder_tracks' body-offset index space (they differ once MIDI is
+        # present, since 0x2620 playlists cluster in the body away from spec order).
+        cur = _container_display_offsets(body)               # playlist offsets in build/spec order
+        tpo = {o: i for i, (o, _t) in enumerate(track_playlist_order(body))}
+        body = reorder_tracks(body, [tpo[cur[d]] for d in display_order])
+    return body
 
 
 # --- index-offset pointer ----------------------------------------------------

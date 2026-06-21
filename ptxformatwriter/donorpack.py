@@ -214,6 +214,196 @@ def write_stereo_data(control_root, out_path="ptxformatwriter/_stereo_data.py") 
     return out
 
 
+_MONO_SCAFFOLD_SRC = "lots of mono tracks/8 mono tracks.ptx"
+_MONO_TEMPLATE_SRC = "512 tracks/512 mono tracks.ptx"
+
+
+def write_mono_data(control_root, out_path="ptxformatwriter/_mono_data.py") -> Path:
+    """Regenerate `ptxformatwriter/_mono_data.py` — the inlined assets for
+    `body_synth.synthesize_mono_inline` (no external control files). An 8-track mono
+    scaffold + the track-2/10/100 (1/2/3-digit) mono unit templates from the 512-mono
+    control. Unlike stereo, the scaffold and templates come from different folders, so
+    TEMPLATE_LEAF records the templates' embedded folder leaf for path-normalization."""
+    import base64
+    import zlib
+    control_root = Path(control_root)
+    scaffold = W.load_unxored(str(control_root / _MONO_SCAFFOLD_SRC))
+    mono512 = W.load_unxored(str(control_root / _MONO_TEMPLATE_SRC))
+    template_leaf = B._folder_leaf(mono512) or ""
+
+    def _ser(u) -> bytes:  # mono unit = 8 blocks (ONE 0x1052 lane)
+        blks = [u.b1014, u.b1052[0], u.b251a[0], u.b251a[1], u.b210b, u.b261c, u.b2589, u.name_entry]
+        return b"".join(len(b).to_bytes(4, "little") + b for b in blks)
+
+    def _enc(b: bytes) -> str:
+        return base64.b64encode(zlib.compress(b, 9)).decode()
+
+    t1 = _ser(B.extract_track(mono512, 2, 512, channels=1))
+    t2 = _ser(B.extract_track(mono512, 10, 512, channels=1))
+    t3 = _ser(B.extract_track(mono512, 100, 512, channels=1))
+    body = (
+        '"""GENERATED mono-synthesis assets — inlined so N-mono sessions build with NO external\n'
+        'control files. Regenerate via `donorpack.write_mono_data(control_root)`. Sources:\n'
+        "'8 mono tracks.ptx' (scaffold, base_n=8) + '512 mono tracks.ptx' (track-2/10/100 = 1/2/3-digit\n"
+        'unit templates). TEMPLATE_LEAF = the templates\' embedded folder leaf (normalized to the\n'
+        'scaffold\'s leaf at build time). Handle/blob are free (PT needs only their presence)."""\n'
+        "import base64 as _b64, zlib as _z\n"
+        "from . import body_synth as _B\n\n"
+        f'TEMPLATE_LEAF = {template_leaf!r}\n'
+        f'_SCAFFOLD = "{_enc(scaffold)}"\n'
+        f'_TMPL1 = "{_enc(t1)}"\n'
+        f'_TMPL2 = "{_enc(t2)}"\n'
+        f'_TMPL3 = "{_enc(t3)}"\n\n'
+        "def _dec(s): return _z.decompress(_b64.b64decode(s))\n"
+        "def _unit(blob):\n"
+        "    o = 0; bs = []\n"
+        "    for _ in range(8):\n"
+        '        n = int.from_bytes(blob[o:o + 4], "little"); o += 4; bs.append(blob[o:o + n]); o += n\n'
+        "    return _B.StereoTrackUnit(b1014=bs[0], b1052=(bs[1],), b251a=(bs[2], bs[3]),\n"
+        "                              b210b=bs[4], b261c=bs[5], b2589=bs[6], name_entry=bs[7])\n\n"
+        "def mono_scaffold(): return _dec(_SCAFFOLD)          # 8-track mono clean session (base_n=8)\n"
+        "def mono_templates():                                # (1-digit, 2-digit, 3-digit)\n"
+        "    return _unit(_dec(_TMPL1)), _unit(_dec(_TMPL2)), _unit(_dec(_TMPL3))\n"
+    )
+    out = Path(out_path)
+    out.write_text(body)
+    return out
+
+
+_MIXED_DONOR_SRC = {  # (spec[0] channels, spec[1] channels) -> 2-track start-pair donor
+    (2, 2): "lots of stereo tracks/2 stereo tracks.ptx",
+    (1, 1): "lots of mono tracks/2 mono tracks.ptx",
+    (2, 1): "mixed tracks/stereo mono.ptx",
+    (1, 2): "mixed tracks/mono stereo.ptx",
+}
+
+
+def write_mixed_data(control_root, out_path="ptxformatwriter/_mixed_data.py") -> Path:
+    """Regenerate `ptxformatwriter/_mixed_data.py` — the four 2-track start-pair donors that let
+    `body_synth.synthesize_mixed_inline(spec)` build an arbitrary mono/stereo ORDER with NO
+    external control files. The per-track units come from the inlined stereo/mono templates
+    (`_stereo_data`/`_mono_data`); these donors only supply the base_n=2 grow anchor matching
+    spec[:2]. Also records the stereo + mono template folder leaves for path-normalization."""
+    import base64
+    import zlib
+    control_root = Path(control_root)
+
+    def _enc(b: bytes) -> str:
+        return base64.b64encode(zlib.compress(b, 9)).decode()
+
+    donors = {k: _enc(W.load_unxored(str(control_root / rel))) for k, rel in _MIXED_DONOR_SRC.items()}
+    stereo_leaf = B._folder_leaf(W.load_unxored(str(control_root / _STEREO_TEMPLATE_SRC))) or ""
+    mono_leaf = B._folder_leaf(W.load_unxored(str(control_root / _MONO_TEMPLATE_SRC))) or ""
+    lines = [
+        '"""GENERATED mixed-order donors — inlined so arbitrary mono/stereo sessions build with NO',
+        'external control files. Regenerate via `donorpack.write_mixed_data(control_root)`. Each',
+        'donor is a 2-track session matching one (spec[0],spec[1]) start pair; the rest of the',
+        'tracks are generated from the inlined stereo/mono unit templates. STEREO/MONO_TEMPLATE_LEAF',
+        'are the template folder leaves, normalized to the donor leaf at build time."""',
+        "import base64 as _b64, zlib as _z",
+        "",
+        f"STEREO_TEMPLATE_LEAF = {stereo_leaf!r}",
+        f"MONO_TEMPLATE_LEAF = {mono_leaf!r}",
+        "_DONORS = {",
+    ]
+    for (c0, c1), enc in donors.items():
+        lines.append(f'    ({c0}, {c1}): "{enc}",')
+    lines += [
+        "}",
+        "",
+        "def mixed_donor(c0, c1):  # the 2-track donor whose first two track types == (c0, c1)",
+        "    return _z.decompress(_b64.b64decode(_DONORS[(c0, c1)]))",
+        "",
+        "def start_pairs(): return set(_DONORS)",
+    ]
+    out = Path(out_path)
+    out.write_text("\n".join(lines) + "\n")
+    return out
+
+
+_CLICK_CLEAN_SRC = "lots of stereo tracks/2 stereo tracks.ptx"
+_CLICK_CLICK_SRC = "lots of stereo tracks/2 stereo plus click.ptx"
+
+
+def write_click_data(control_root, out_path="ptxformatwriter/_click_data.py") -> Path:
+    """Regenerate `ptxformatwriter/_click_data.py` — the clean/click control PAIR that
+    `body_synth.synthesize(..., click=...)` splices a single Click track from (via the
+    layout-independent `add_click_anyN`/`click_clone`), with NO external control files. The
+    pair is a 2-stereo session + the same session with a Click track; `add_click_anyN` re-keys
+    it onto a target body of any track count/type."""
+    import base64
+    import zlib
+    control_root = Path(control_root)
+
+    def _enc(b: bytes) -> str:
+        return base64.b64encode(zlib.compress(b, 9)).decode()
+
+    clean = _enc(W.load_unxored(str(control_root / _CLICK_CLEAN_SRC)))
+    click = _enc(W.load_unxored(str(control_root / _CLICK_CLICK_SRC)))
+    body = (
+        '"""GENERATED click donor pair — inlined so a Click track can be added with NO external\n'
+        'control files. Regenerate via `donorpack.write_click_data(control_root)`. Sources:\n'
+        "'2 stereo tracks.ptx' (clean) + '2 stereo plus click.ptx' (with click); their structural\n"
+        'diff is the click footprint that `add_click_anyN` re-keys onto any target session."""\n'
+        "import base64 as _b64, zlib as _z\n\n"
+        f'_CLEAN = "{clean}"\n'
+        f'_CLICK = "{click}"\n\n'
+        "def _dec(s): return _z.decompress(_b64.b64decode(s))\n"
+        "def click_pair(): return _dec(_CLEAN), _dec(_CLICK)   # (clean_ref, click_ref)\n"
+    )
+    out = Path(out_path)
+    out.write_text(body)
+    return out
+
+
+_MIXED_MIDI_DONOR_SRC = "multiple track types/multiple track types no click fresh.ptx"
+_MIDI_TEMPLATE_SRC = "lots of stereo tracks/8 MIDI tracks.ptx"
+_MIDI_TMPL_KEYS = ("b1057", "b210b", "b2620", "b251a_0", "b251a_1", "b2589", "name_entry")
+
+
+def write_mixed_midi_data(control_root, out_path="ptxformatwriter/_mixed_midi_data.py") -> Path:
+    """Regenerate `ptxformatwriter/_mixed_midi_data.py` — the inlined assets for
+    `body_synth.synthesize_mixed_midi_inline` (mono+stereo+MIDI with NO external control files).
+    A `multiple track types` donor (internal order [mono, MIDI, stereo] = [1, 0, 2], base_n=3,
+    carrying both audio AND MIDI containers) + the single-digit MIDI unit template extracted from
+    the 8-MIDI control. MIDI tracks carry no folder path, so only DONOR_LEAF (the donor's own leaf)
+    is recorded — the audio template leaves are normalized by `synthesize_mixed_midi`."""
+    import base64
+    import zlib
+    control_root = Path(control_root)
+    donor = W.load_unxored(str(control_root / _MIXED_MIDI_DONOR_SRC))
+    midi8 = W.load_unxored(str(control_root / _MIDI_TEMPLATE_SRC))
+    donor_leaf = B._folder_leaf(donor) or ""
+    tmpl = B.extract_midi_unit(midi8, 2, 8)  # the proven single-digit template (track 2 of 8)
+
+    def _enc(b: bytes) -> str:
+        return base64.b64encode(zlib.compress(b, 9)).decode()
+
+    ser_tmpl = b"".join(len(tmpl[k]).to_bytes(4, "little") + tmpl[k] for k in _MIDI_TMPL_KEYS)
+    body = (
+        '"""GENERATED mixed audio+MIDI synthesis assets — inlined so mono+stereo+MIDI sessions build\n'
+        'with NO external control files. Regenerate via `donorpack.write_mixed_midi_data(control_root)`.\n'
+        "Sources: 'multiple track types no click fresh.ptx' (donor, internal order [1,0,2], base_n=3,\n"
+        "carries the MIDI containers) + '8 MIDI tracks.ptx' (single-digit MIDI unit template, track 2).\n"
+        'DONOR_LEAF = the donor\'s folder leaf; MIDI units carry no path so need no leaf."""\n'
+        "import base64 as _b64, zlib as _z\n\n"
+        f'DONOR_LEAF = {donor_leaf!r}\n'
+        f"_KEYS = {_MIDI_TMPL_KEYS!r}\n"
+        f'_DONOR = "{_enc(donor)}"\n'
+        f'_TMPL = "{_enc(ser_tmpl)}"\n\n'
+        "def _dec(s): return _z.decompress(_b64.b64decode(s))\n"
+        "def mixed_midi_donor(): return _dec(_DONOR)   # [mono, MIDI, stereo] donor (base_n=3)\n"
+        "def midi_template():                          # extract_midi_unit dict (7 blocks)\n"
+        "    blob = _dec(_TMPL); o = 0; d = {}\n"
+        "    for k in _KEYS:\n"
+        '        n = int.from_bytes(blob[o:o + 4], "little"); o += 4; d[k] = blob[o:o + n]; o += n\n'
+        "    return d\n"
+    )
+    out = Path(out_path)
+    out.write_text(body)
+    return out
+
+
 class DonorPack:
     """A loaded donor pack. Use :meth:`controls` to get a `Controls` bundle."""
 

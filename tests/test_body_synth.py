@@ -536,5 +536,422 @@ class SynthStereoUnitTests(unittest.TestCase):
                                  msg=f"k={k} {key}: deterministic re-key must equal the real unit")
 
 
+_MONO512 = ROOT / "control_files" / "512 tracks" / "512 mono tracks.ptx"
+
+
+@unittest.skipUnless(_MONO512.exists(), "need the 512-mono control to validate the mono re-key")
+class SynthMonoUnitTests(unittest.TestCase):
+    """`synth_mono_unit`'s deterministic re-key must reproduce the real 512-mono unit
+    byte-for-byte (the property that lets the generator replace a mono library). Mono is
+    the audio structure with ONE 0x1052 lane and channel index k-1."""
+
+    def test_deterministic_rekey_reproduces_512_mono_unit(self) -> None:
+        d = _load_path(_MONO512)
+        for k in (3, 9, 10, 99, 100, 256, 300, 511):     # both digit ranges + the u16 transition
+            ref_blocks = BS._mono_unit_blocks(BS.extract_track(d, k, 512, channels=1))
+            M = {1: BS._MONO_MAP_1, 2: BS._MONO_MAP_2, 3: BS._MONO_MAP_3}[len(str(k))]
+            for key, spec in M.items():
+                buf = bytearray(ref_blocks[key])
+                o, w = spec["name"]
+                buf[o:o + w] = str(k).encode()
+                for off, wd, fn in spec["lin"]:
+                    buf[off:off + wd] = int(fn(k)).to_bytes(wd, "little")
+                self.assertEqual(bytes(buf), ref_blocks[key],
+                                 msg=f"k={k} {key}: mono re-key must equal the real unit")
+
+    def test_synth_mono_unit_is_one_lane(self) -> None:
+        d = _load_path(_MONO512)
+        t = tuple(BS.extract_track(d, kk, 512, channels=1) for kk in (2, 10, 100))
+        u = BS.synth_mono_unit(30, *t)
+        self.assertEqual(len(u.b1052), 1, msg="mono unit must have exactly one 0x1052 lane")
+        self.assertEqual(u.name_entry[10:12], b"30", msg="track-30 name digits")
+
+
+class MonoInlineTests(unittest.TestCase):
+    """`synthesize_mono_inline` builds an n-mono session from inlined assets alone (8-track
+    scaffold + 512-mono templates in `_mono_data`), no external control files."""
+
+    def test_inline_mono_builds(self) -> None:
+        for n in (8, 30, 100):
+            synth = BS.synthesize_mono_inline(n)
+            self.assertEqual(len(BS.track_types(synth)), n, msg=f"n={n} tracks")
+            self.assertEqual(BS.channel_count(synth), n, msg=f"n={n} mono = 1 channel/track")
+            blk = BS._by_type(BS.parse(synth), 0x2519)[0]
+            first_child = min(c.offset - 7 for c in blk.child)
+            self.assertEqual(len(BS._name_table_entries(synth[blk.offset:first_child])), n)
+            with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+                tmp.write(W.encrypt_session_data(synth)); path = tmp.name
+            try:
+                self.assertEqual(PTFFormat().load(path, 48000), 0, msg=f"n={n} reload")
+            finally:
+                Path(path).unlink(missing_ok=True)
+
+    def test_inline_mono_no_chimera(self) -> None:
+        """The 512-mono templates' folder leaf is normalized to the scaffold's (no chimera)."""
+        from ptxformatwriter import _mono_data as MD
+        synth = BS.synthesize_mono_inline(30)
+        self.assertEqual(BS.track_name_occurrences(synth, MD.TEMPLATE_LEAF), [],
+                         msg="template folder leaf must be renamed away")
+
+    def test_inline_mono_guards(self) -> None:
+        with self.assertRaises(ValueError):
+            BS.synthesize_mono_inline(5)
+        with self.assertRaises(ValueError):
+            BS.synthesize_mono_inline(BS._STEREO_INLINE_MAX + 1)
+
+
+class MixedInlineTests(unittest.TestCase):
+    """`synthesize_mixed_inline` builds an arbitrary mono+stereo ORDER from inlined assets
+    (4 start-pair donors in `_mixed_data` + the stereo/mono unit templates), no external files."""
+
+    def test_arbitrary_order_builds(self) -> None:
+        from ptxformatwriter import _mixed_data as XD
+        for spec in ([2, 1, 2, 1, 2, 1, 1, 2, 2, 1], [1, 2, 1, 2, 1, 2, 2, 1, 1, 2],
+                     [2] * 8, [1] * 8, [2, 1] * 10):
+            synth = BS.synthesize_mixed_inline(spec)
+            self.assertEqual([t.channels for t in BS.track_types(synth)], spec, msg=f"spec {spec}")
+            self.assertEqual(BS.channel_count(synth), sum(spec), msg="total channels")
+            base, want = 0, []
+            for ch in spec:
+                want.append(list(range(base, base + ch))); base += ch
+            self.assertEqual([BS.track_channel_indices(synth, t.offset) for t in BS.track_types(synth)],
+                             want, msg="cumulative channel allocation")
+            donor = XD.mixed_donor(spec[0], spec[1])
+            dl = BS._folder_leaf(donor)
+            for tl in (XD.STEREO_TEMPLATE_LEAF, XD.MONO_TEMPLATE_LEAF):
+                if tl != dl:
+                    self.assertEqual(BS.track_name_occurrences(synth, tl), [],
+                                     msg=f"template leaf {tl!r} must be normalized (no chimera)")
+            with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+                tmp.write(W.encrypt_session_data(synth)); path = tmp.name
+            try:
+                self.assertEqual(PTFFormat().load(path, 48000), 0, msg=f"reload {spec}")
+            finally:
+                Path(path).unlink(missing_ok=True)
+
+    def test_mixed_guards(self) -> None:
+        with self.assertRaises(ValueError):
+            BS.synthesize_mixed_inline([2])           # < 2 tracks (no grow anchor)
+        with self.assertRaises(ValueError):
+            BS.synthesize_mixed_inline([2, 3])        # 3 = invalid channel count
+
+
+class SynthesizeTests(unittest.TestCase):
+    """The unified `synthesize(spec, click=...)`: arbitrary mono+stereo order + an optional
+    single Click track (top/bottom), all from inlined assets (no external control files)."""
+
+    def test_synthesize_variants(self) -> None:
+        cases = [([2] * 12, "top"), ([1] * 12, "bottom"), ([2, 1, 2, 1, 2, 1, 1, 2], "bottom"),
+                 ([2, 1, 2, 1], None), ([1, 2, 1], "top")]
+        for spec, click in cases:
+            out = BS.synthesize(spec, click=click)
+            self.assertEqual([t.channels for t in BS.track_types(out)], spec, msg=f"spec {spec}")
+            self.assertEqual(bool(BS.track_name_occurrences(out, "Click 1")), click is not None,
+                             msg=f"click {click} for {spec}")
+            with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+                tmp.write(W.encrypt_session_data(out)); path = tmp.name
+            try:
+                self.assertEqual(PTFFormat().load(path, 48000), 0, msg=f"reload {spec} click={click}")
+            finally:
+                Path(path).unlink(missing_ok=True)
+
+    def test_synthesize_click_guard(self) -> None:
+        with self.assertRaises(ValueError):
+            BS.synthesize([2, 2], click="middle")
+
+    def test_no_volume_view_blocks(self) -> None:
+        """REGRESSION: every track's edit-window view must be WAVEFORM, not volume. The click
+        splice (and a click-converted donor/scaffold track) can leave volume-view blocks (0x203b
+        under 0x2015/0x2589); `synthesize` runs `set_waveform_view` last to force waveform."""
+        for spec, click in (([2, 1, 2, 1, 2, 1, 1, 2], "bottom"), ([2] * 12, "top"),
+                            ([1, 2, 1], None)):
+            out = BS.synthesize(spec, click=click)
+            ptf = BS.parse(out)
+            ctype: dict = {}
+            par: dict = {}
+
+            def _rec(b, p):
+                z = b.offset - 7
+                ctype[z] = b.content_type
+                par[z] = p
+                for c in b.child:
+                    _rec(c, z)
+
+            for b in ptf.blocks:
+                _rec(b, None)
+            vol = sum(1 for z, ct in ctype.items()
+                      if ct == 0x203b and ctype.get(par[z]) in (0x2015, 0x2589)
+                      and out[z:z + len(BS._VIEW_VOLUME)] == BS._VIEW_VOLUME)
+            self.assertEqual(vol, 0, msg=f"spec {spec} click={click}: {vol} volume-view blocks left")
+
+
+_MIDI8 = CONTROL_DIR / "8 MIDI tracks.ptx"
+
+
+@unittest.skipUnless(_MIDI8.exists(), "need the 8-MIDI control")
+class MidiTests(unittest.TestCase):
+    """MIDI track synthesis: `synth_midi_unit` (its own block set, no audio lanes) +
+    `grow_one_midi_track` + the MIDI index path (`final_index.add_midi_track`). Grow the 8-MIDI
+    control to 9 and build the index; every index offset must resolve (no danglers) + reload."""
+
+    def test_midi_grow_and_index(self) -> None:
+        d = _load_path(_MIDI8)
+        body = d[:FI.final_index_ref(d).start]
+        tmpl = BS.extract_midi_unit(d, 2, 8)
+        body9 = BS.grow_one_midi_track(body, 8, BS.synth_midi_unit(9, tmpl))
+        self.assertEqual(len(BS._by_type(BS.parse(body9), 0x2620)), 9, msg="9 MIDI playlist blocks")
+        body9 = BS._fix_name_table_special_last(body9, 9)
+        idx = FI.compose_index(d, body9 + d[FI.final_index_ref(d).start:], 8, 9,
+                               channels=[0] * 9, track_names=[f"MIDI {i + 1}" for i in range(9)],
+                               midi_tracks={9})
+        out = BS._set_index_offset(body9 + idx)
+        ref = FI.final_index_ref(out)
+        z2t, by_type = FI.block_layout(out)
+        zmarks = set(z2t)
+        recs = FI.parse_records(ref.data, set(by_type), zmarks)
+        offs = [c.offset for r in recs for c in r.child_refs] + \
+               [o for r in recs for e in r.elements for o in e.offsets]
+        self.assertTrue(offs and all(o in zmarks for o in offs), msg="all MIDI index offsets resolve")
+        with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as tmp:
+            tmp.write(W.encrypt_session_data(out)); path = tmp.name
+        try:
+            self.assertEqual(PTFFormat().load(path, 48000), 0, msg="9-MIDI reload")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_synth_midi_unit_single_digit_gate(self) -> None:
+        tmpl = BS.extract_midi_unit(_load_path(_MIDI8), 2, 8)
+        self.assertIn(b"MIDI 7", BS.synth_midi_unit(7, tmpl)["name_entry"])
+        with self.assertRaises(ValueError):     # multi-digit MIDI is gated (no >=10-track control)
+            BS.synth_midi_unit(10, tmpl)
+
+    def _name_entry_sizes(self, body: bytes) -> list[int]:
+        """Per-entry byte sizes of the 0x2519 own-byte name table (start-to-start)."""
+        b = BS._by_type(BS.parse(body), 0x2519)[0]
+        fc = min(c.offset - 7 for c in b.child)
+        region = body[b.offset:fc]
+        starts = [m.start() - 4 for m in BS._NAME_RE.finditer(region)]
+        return [(starts[i + 1] - starts[i]) if i + 1 < len(starts) else (len(region) - starts[i])
+                for i in range(len(starts))]
+
+    def test_midi_name_table_special_is_last(self) -> None:
+        """PT-confirmed root cause (2026-06-20): the grow path strands the donor's SPECIAL (short)
+        last name entry mid-table; PT reads at the normal stride, misaligns, and runs off the block
+        -> "end of stream encountered". `_fix_name_table_special_last` must move the short entry to
+        the LAST position. It silently no-ops on MIDI/Click if it hardcodes "Audio ", so assert it
+        actually fired (the short entry is last, not stranded) and stayed size-preserving."""
+        d = _load_path(_MIDI8)
+        body = d[:FI.final_index_ref(d).start]
+        body9 = BS.grow_one_midi_track(body, 8, BS.synth_midi_unit(9, BS.extract_midi_unit(d, 2, 8)))
+        before = self._name_entry_sizes(body9)
+        self.assertEqual(len(before), 9, msg="9 name entries")
+        self.assertLess(before.index(min(before)), 8, msg="precondition: short entry is stranded mid-table")
+        fixed = BS._fix_name_table_special_last(body9, 9)
+        self.assertNotEqual(fixed, body9, msg="fix must fire on MIDI (a no-op re-opens the EOS bug)")
+        after = self._name_entry_sizes(fixed)
+        self.assertEqual(after.index(min(after)), 8, msg="SPECIAL (short) entry must be LAST")
+        self.assertEqual(after[:8], [max(after)] * 8, msg="all but last are full-size")
+        self.assertEqual(sum(after), sum(before), msg="size-preserving")
+
+
+_MTT_FRESH = MTT_DIR / "multiple track types no click fresh.ptx"
+
+
+@unittest.skipUnless(_MTT_FRESH.exists() and _MIDI8.exists(),
+                     "need the multiple-track-types donor + 8-MIDI control")
+class MixedMidiTests(unittest.TestCase):
+    """Arbitrary mono+stereo+MIDI synthesis via `synthesize_mixed_midi` (the audio+MIDI weave on
+    top of `synthesize_mixed_session`). The donor is a `multiple track types` control (internal
+    order [mono, MIDI, stereo] = [1, 0, 2]); spec is INTERNAL order. Validates structure that our
+    lenient reader would miss — channel multiset, the per-name SPECIAL-last name table, every index
+    offset resolving to the right block type (incl. MIDI 0x2620 playlists), 0x2589 == n-1, no path
+    chimera — then a reload. PT-confirmed at internal specs [1,0,2,1] / [1,0,2,1,0] (2026-06-20)."""
+
+    SPECS = ([1, 0, 2, 1], [1, 0, 2, 1, 0], [1, 0, 2, 2, 0, 1], [1, 0, 2, 1, 2, 1, 0, 2, 0])
+
+    def setUp(self) -> None:
+        self.donor = _load_path(_MTT_FRESH)
+        self.tmpl = BS.extract_midi_unit(_load_path(_MIDI8), 2, 8)
+
+    def _build(self, spec):
+        return BS.synthesize_mixed_midi(spec, self.donor, self.tmpl)
+
+    def test_donor_internal_order(self) -> None:
+        self.assertEqual(BS._internal_channel_order(self.donor), [1, 0, 2])
+
+    def test_structure_and_reload(self) -> None:
+        from ptxformatwriter import _mixed_data as _XD
+        for spec in self.SPECS:
+            with self.subTest(spec=spec):
+                out = self._build(spec)
+                n = len(spec)
+                # channel multiset (display order differs from internal spec)
+                self.assertEqual(Counter(t.channels for t in BS.track_types(out)), Counter(spec))
+                # name table: per-name full sizes, SPECIAL (-2) on the last entry only
+                b = BS._by_type(BS.parse(out), 0x2519)[0]
+                fc = min(c.offset - 7 for c in b.child)
+                region = out[b.offset:fc]
+                ms = list(BS._NAME_RE.finditer(region))
+                starts = [m.start() - 4 for m in ms]
+                sizes = [(starts[i + 1] - starts[i]) if i + 1 < len(starts) else (len(region) - starts[i])
+                         for i in range(len(starts))]
+                fulls = [4 + (m.end() - m.start()) + BS._NAME_ENTRY_SUFFIX for m in ms]
+                self.assertEqual(len(sizes), n)
+                for i, (s, f) in enumerate(zip(sizes, fulls)):
+                    self.assertEqual(s, f - 2 if i == n - 1 else f, msg=f"entry {i} size")
+                # every index offset is a live ZMARK; MIDI playlists/lanes are referenced
+                ref = FI.final_index_ref(out)
+                z2t, by_type = FI.block_layout(out)
+                zmarks = set(z2t)
+                recs = FI.parse_records(ref.data, set(by_type), zmarks)
+                offs = [c.offset for r in recs for c in r.child_refs] + \
+                       [o for r in recs for e in r.elements for o in e.offsets]
+                self.assertTrue(offs and all(o != 0 and o in zmarks for o in offs), msg="offsets resolve")
+                cts = Counter(z2t[o] for o in offs)
+                self.assertEqual(cts.get(0x2620, 0), spec.count(0), msg="one 0x2620 per MIDI track")
+                self.assertGreater(cts.get(0x251a, 0), 0, msg="lanes referenced")
+                # overview/counters + no path chimera
+                self.assertEqual(len(BS._by_type(BS.parse(out), 0x2589)), n - 1, msg="0x2589 == n-1")
+                for tl in (_XD.STEREO_TEMPLATE_LEAF, _XD.MONO_TEMPLATE_LEAF):
+                    self.assertFalse(BS.track_name_occurrences(out, tl), msg=f"leaf {tl!r} normalized")
+                # reload
+                with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as t:
+                    t.write(W.encrypt_session_data(out))
+                    p = t.name
+                try:
+                    self.assertEqual(PTFFormat().load(p, 48000), 0, msg=f"reload spec {spec}")
+                finally:
+                    Path(p).unlink(missing_ok=True)
+
+    def test_misuse_guards(self) -> None:
+        with self.assertRaises(ValueError):          # spec[:base_n] must match donor internal order
+            self._build([2, 0, 1, 1])
+        with self.assertRaises(ValueError):          # grown MIDI must sit at internal position <= 9
+            self._build([1, 0, 2] + [1] * 7 + [0])   # MIDI at internal position 11
+
+    def test_inline_path_byte_identical(self) -> None:
+        """The no-external-files `synthesize_mixed_midi_inline` (inlined donor + MIDI template) is
+        byte-identical to the control-file donor path — so PT-confirmed by transitivity — and the
+        top-level `synthesize` routes MIDI specs to it."""
+        for spec in self.SPECS:
+            with self.subTest(spec=spec):
+                ctrl = self._build(spec)
+                inline = BS.synthesize_mixed_midi_inline(spec)
+                self.assertEqual(inline, ctrl, msg="inline == control-file path")
+                self.assertEqual(BS.synthesize(spec), inline, msg="synthesize() routes MIDI to inline")
+
+    def test_click_plus_midi(self) -> None:
+        """A click coexists with MIDI — top, bottom, and (via display_order over the N+1 tracks)
+        anywhere in between. Every index offset resolves (the click's lane refs AND the MIDI
+        playlists — the bug was `_finish_click` rebuilding the index for audio tracks only), and
+        the session reloads."""
+        def ok(data, expect_display):
+            self.assertEqual(self._display_names(data), expect_display)
+            ref = FI.final_index_ref(data)
+            zt, bt = FI.block_layout(data)
+            zmarks = set(zt)
+            recs = FI.parse_records(ref.data, set(bt), zmarks)
+            offs = [c.offset for r in recs for c in r.child_refs] + \
+                   [o for r in recs for e in r.elements for o in e.offsets]
+            self.assertTrue(offs and all(o != 0 and o in zmarks for o in offs),
+                            msg="all offsets resolve (no zeros/danglers)")
+            with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as t:
+                t.write(W.encrypt_session_data(data)); p = t.name
+            try:
+                self.assertEqual(PTFFormat().load(p, 48000), 0, msg="reload")
+            finally:
+                Path(p).unlink(missing_ok=True)
+        ok(BS.synthesize([1, 0, 2, 1, 0], click="bottom"),
+           ["Audio 1", "MIDI 1", "Audio 2", "Audio 3", "MIDI 2", "Click 1"])
+        ok(BS.synthesize([1, 0, 2, 1, 0], click="top"),
+           ["Click 1", "Audio 1", "MIDI 1", "Audio 2", "Audio 3", "MIDI 2"])
+        ok(BS.synthesize([1, 0, 2, 1, 0], click="bottom", display_order=[0, 1, 5, 2, 3, 4]),
+           ["Audio 1", "MIDI 1", "Click 1", "Audio 2", "Audio 3", "MIDI 2"])
+
+    def _display_names(self, data):
+        """Edit-window display order = the 0x2624 container list (what PT reads), as track names."""
+        name_at = {}
+        for ct in (0x261c, 0x261e, 0x2620):
+            for b in BS._by_type(BS.parse(data), ct):
+                blk = data[b.offset - 7:b.offset + b.block_size]
+                m = BS._NAME_RE.search(blk)
+                name_at[b.offset - 7] = m.group().decode() if m else "?"
+        return [name_at.get(o, "?") for o in BS._container_display_offsets(data)]
+
+    def test_display_order(self) -> None:
+        """`synthesize(spec, display_order=...)` sets the edit-window order independently of build
+        order (spec-relative indices), placing MIDI anywhere — including the literal middle of an
+        audio run. Index-only (body unchanged); identity is a no-op; reorders reload."""
+        spec = [1, 0, 2, 1, 0]  # build: A1(mono), MIDI 1, A2(stereo), A3(mono), MIDI 2
+        base = BS.synthesize(spec)
+        self.assertEqual(self._display_names(base),
+                         ["Audio 1", "MIDI 1", "Audio 2", "Audio 3", "MIDI 2"], msg="build order")
+        self.assertEqual(self._display_names(BS.synthesize(spec, display_order=[0, 2, 1, 3, 4])),
+                         ["Audio 1", "Audio 2", "MIDI 1", "Audio 3", "MIDI 2"], msg="MIDI to middle")
+        self.assertEqual(self._display_names(BS.synthesize(spec, display_order=[4, 3, 2, 1, 0])),
+                         ["MIDI 2", "Audio 3", "Audio 2", "MIDI 1", "Audio 1"], msg="reverse")
+        # Identity display_order keeps the display order (it normalizes the count==4 instance
+        # ordinals to display-position/ground-truth form, which is a byte change but same display).
+        ident = BS.synthesize(spec, display_order=[0, 1, 2, 3, 4])
+        self.assertEqual(self._display_names(ident), self._display_names(base), msg="identity display")
+        body0 = base[:FI.final_index_ref(base).start]
+        reordered = BS.synthesize(spec, display_order=[0, 2, 1, 3, 4])
+        self.assertEqual(reordered[:FI.final_index_ref(reordered).start], body0, msg="index-only")
+        with tempfile.NamedTemporaryFile(suffix=".ptx", delete=False) as t:
+            t.write(W.encrypt_session_data(reordered)); p = t.name
+        try:
+            self.assertEqual(PTFFormat().load(p, 48000), 0, msg="reordered reload")
+        finally:
+            Path(p).unlink(missing_ok=True)
+
+    def test_display_order_matches_control(self) -> None:
+        """A synthesized MIDI-in-middle reorder structurally matches the real PT control of the same
+        order (A2 M1 A1): same 0x2624 container type-sequence + same count==4 instance (ordinal,
+        childtype) pairs — the instance ordinals skip the MIDI display slot exactly as PT writes."""
+        def structure(data):
+            type_at = {}
+            for ct in (0x261c, 0x261e, 0x2620):
+                for b in BS._by_type(BS.parse(data), ct):
+                    type_at[b.offset - 7] = ct
+            ref = FI.final_index_ref(data)
+            zt, bt = FI.block_layout(data)
+            cont, insts = [], []
+            for r in FI.parse_records(ref.data, set(bt), set(zt)):
+                if r.content_type == 0x2624 and r.count == 1 and r.flag == 1:
+                    cont = [type_at.get(e.offsets[0]) for e in r.elements[1:] if e.offsets]
+                elif r.content_type == 0x2624 and r.count == 4 and len(r.child_refs) >= 2:
+                    insts.append((r.ordinal, r.child_refs[0].child_type))
+            return cont, sorted(insts)
+        mine = BS.synthesize([1, 0, 2], display_order=[2, 1, 0])  # display: stereo, MIDI, mono
+        ctrl = _load_path(MTT_DIR / "multiple track types no click A2 M1 A1.ptx")
+        self.assertEqual(structure(mine), structure(ctrl), msg="0x2624 structure matches PT control")
+
+    def test_click_midi_waveform_view(self) -> None:
+        """The click splice embeds a VOLUME-view block chain inside the click's 0x261e (the
+        source control saved the click in volume view), nested too deep for the block parser to
+        reach. set_waveform_view scrubs it (raw scan) so no audio track renders in volume view when
+        it lands at the click's display row. Assert zero non-automation view-volume blocks remain,
+        and that real 0x2580 volume-automation is preserved (not over-converted)."""
+        for kw in (dict(click="bottom"), dict(click="top"),
+                   dict(click="bottom", display_order=[0, 1, 5, 2, 3, 4])):
+            with self.subTest(**kw):
+                out = BS.synthesize([1, 0, 2, 1, 0], **kw)
+                self.assertEqual(BS._view_volume_offsets(out, FI.final_index_ref(out).start), [],
+                                 msg="no non-automation view-volume blocks remain")
+                autos = sum(1 for b in BS.flat_blocks(BS.parse(out)) if b.content_type == 0x203b)
+                self.assertGreater(autos, 0, msg="real 0x2580 volume-automation preserved")
+
+    def test_clean_per_type_names(self) -> None:
+        """Grown tracks get clean per-type counters (no internal-position gaps): the audio tracks
+        are named Audio 1..A and the MIDI tracks MIDI 1..M, each a gap-free 1..k run."""
+        for spec in self.SPECS:
+            with self.subTest(spec=spec):
+                names = [t.name for t in BS.track_types(self._build(spec))]
+                audio = [int(n.split()[1]) for n in names if n.startswith("Audio ")]
+                midi = [int(n.split()[1]) for n in names if n.startswith("MIDI ")]
+                self.assertEqual(audio, list(range(1, len(audio) + 1)), msg="Audio 1..A no gaps")
+                self.assertEqual(midi, list(range(1, len(midi) + 1)), msg="MIDI 1..M no gaps")
+
+
 if __name__ == "__main__":
     unittest.main()

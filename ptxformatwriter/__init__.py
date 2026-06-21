@@ -22,7 +22,10 @@ from .donorpack import (
     DonorPack,
     build_pack,
     load_controls,
+    write_click_data,
     write_inline_templates,
+    write_mixed_data,
+    write_mono_data,
     write_stereo_data,
 )
 from .core import (
@@ -45,7 +48,7 @@ __all__ = [
     "body_synth", "core", "donorpack", "wavecache", "workbench", "writer",
     # donor pack (bundle all donors into one regenerable file) + the donor bundle it yields
     "Controls", "DonorPack", "build_pack", "load_controls", "write_inline_templates",
-    "write_stereo_data",
+    "write_click_data", "write_mixed_data", "write_mono_data", "write_stereo_data",
     # core reader types
     "Block", "MeterEvent", "MidiEvent", "MidiPlacement", "PTFFormat",
     "PTFParseError", "Region", "TempoEvent", "Track", "Wav",

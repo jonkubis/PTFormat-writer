@@ -1,10 +1,10 @@
 """Structural click-track synthesis by diff-and-replay (the robust path).
 
-The click is the most entangled track type: besides its own playlist (0x261e +
-DigiClick plugin) and lanes, it adds a "Click 1" name-table entry (0x2519), grows
-the 0x1018 plugin registry ("Click II"), adds TWO overview entries (0x2589 in
-0x258a), and even attaches a nested chain (0x200b->0x200a->0x2015->0x2104->0x2103)
-INSIDE the audio track's 0x261c. A hand-enumerated block transplant is fragile.
+The click is the most entangled track type: besides its own playlist (0x261e + a
+click-plugin block) and lanes, it adds a "Click 1" name-table entry (0x2519), grows
+the 0x1018 plugin registry, adds TWO overview entries (0x2589 in 0x258a), and even
+attaches a nested chain (0x200b->0x200a->0x2015->0x2104->0x2103) INSIDE the audio
+track's 0x261c. A hand-enumerated block transplant is fragile.
 
 Instead, derive the click's contribution as a DIFF between a clean control pair
 that shares the same audio — `1 stereo tracks.ptx` (donor) and `1 stereo plus
@@ -233,18 +233,25 @@ def _merge_reps(target: bytes, reps: list) -> bytes:
 def _finish_click(body: bytes, donor_index_src: bytes) -> bytes:
     """Patch the click-added track counts (0x2107/0x2624/0x202a +1; 0x1015/0x1054 stay),
     compose the click-aware 0x0002 index, and fix the index-offset pointer."""
-    audio = [t for t in BS.track_types(donor_index_src) if t.kind in ("mono", "stereo")]
-    base_n = len(audio)
+    # ALL tracks (audio + MIDI) in INDEX/lane order — NOT track_types' type-grouped order, which
+    # misaligns the per-track names/channels with the index positions once MIDI is present. (For an
+    # audio-only session lane order == track_types order, so this is byte-identical there.)
+    channels = BS._internal_channel_order(donor_index_src)   # 1/2 = audio, 0 = MIDI, lane order
+    base_n = len(channels)                                   # total tracks before the click
+    names = BS._lane_order_track_names(donor_index_src, base_n)
+    n_audio = sum(1 for c in channels if c > 0)
+    midi_tracks = {i + 1 for i, c in enumerate(channels) if c == 0}
     bodyb = bytearray(body)
     BS._patch_counts(bodyb, base_n + 1, BS.channel_count(body))
     b1015 = BS._by_type(BS.parse(bytes(bodyb)), 0x1015)[0]
-    BS._patch_u32(bodyb, b1015.offset + 2, base_n)
+    BS._patch_u32(bodyb, b1015.offset + 2, n_audio)          # 0x1015 = AUDIO track count (MIDI adds 0)
     body = bytes(bodyb)
     donor_index = donor_index_src[_FI.final_index_ref(donor_index_src).start :]
-    names = [t.name for t in audio] + ["Click 1"]
+    # The MIDI playlists (0x2620) already live in the donor index, so only the click's 0x261e is new
+    # — no 0x261E/0x2620 _fill_offsets collision (that only bites when click AND MIDI are both grown).
     index = _FI.compose_index(donor_index_src, body + donor_index, base_n, base_n + 1,
-                              channels=[t.channels for t in audio] + [0],
-                              track_names=names, click_tracks={base_n + 1})
+                              channels=channels + [0], track_names=names + ["Click 1"],
+                              click_tracks={base_n + 1}, midi_tracks=midi_tracks)
     return BS._set_index_offset(body + index)
 
 
@@ -335,15 +342,22 @@ def _restamp_track_count(b: bytes, src_n: int, tgt_n: int) -> bytes:
 
 def _insert_click_2519(body: bytes, lane_bytes: list, name_addition: bytes,
                        audio_n: int, src_n: int) -> bytes:
-    """Insert the click's two 0x251a lanes lane-major (lane-0 after the last audio lane-0,
-    lane-1 at the end) + its name-table addition into the body's 0x2519, re-stamping the
-    track count from the source control's to the target's."""
-    lanes = [_restamp_track_count(l, src_n, audio_n) for l in lane_bytes]
-    name_addition = _restamp_track_count(name_addition, src_n, audio_n)
+    """Insert the click's two 0x251a lanes lane-major (lane-0 after the LAST lane-0 of any kind,
+    lane-1 at the end) + its name-table addition into the body's 0x2519, re-stamping the track
+    count from the source control's to the target's.
+
+    The boundary + the re-stamped count are the TOTAL track count (audio + MIDI + ...), not just
+    audio: 0x251a is lane-major `[N lane-0][N lane-1]` over ALL tracks (every track — audio or
+    MIDI — has 2 lanes), and the click is the (N+1)-th track. Using audio_n would land the click's
+    lane-0 mid-group when MIDI tracks have lane-0s after the audio ones, leaving the index's
+    0x2519 lane refs unresolved (PT 'end of stream'). N = len(0x251a)//2."""
     ptf = BS.parse(body)
     pm = BS._parent_zmarks(ptf)
     a51 = BS._by_type(ptf, 0x251a)
-    lane0_after, last = a51[audio_n - 1], a51[-1]
+    n_tracks = len(a51) // 2  # ALL tracks (audio + MIDI), 2 lanes each — not audio_n
+    lanes = [_restamp_track_count(l, src_n, n_tracks) for l in lane_bytes]
+    name_addition = _restamp_track_count(name_addition, src_n, n_tracks)
+    lane0_after, last = a51[n_tracks - 1], a51[-1]
     ins = [
         BS.Insertion(lane0_after.offset + lane0_after.block_size, lanes[0], pm[lane0_after.offset - 7]),
         BS.Insertion(last.offset + last.block_size, lanes[1], pm[last.offset - 7]),

@@ -324,26 +324,75 @@ def add_click_track(records: list[IndexRecord], new_count: int) -> list[IndexRec
     return out
 
 
+def add_midi_track(records: list[IndexRecord], new_count: int) -> list[IndexRecord]:
+    """Transform the record list to add one MIDI track, bringing the total
+    lane-track count to `new_count`. A MIDI track is a 2-lane "track" with 0 audio
+    channels whose per-track playlist (0x2620) and MIDI-I/O (0x1057) blocks are
+    referenced through ELEMENTS of the two `count==1` container records (0x2624 and
+    0x1058) rather than via dedicated per-track records. So vs. `add_track` it:
+    SKIPS the 0x1015 (audio-count) and 0x1054 (channel) container markers (MIDI adds
+    no audio channels); KEEPS the 0x2519 name-table marker + packed-offset-table
+    growth + the new 0x251a lane instance + the 0x251b/0x2716 ordinal bump; and
+    instead of inserting a per-track 0x2624 `count==4` playlist record (MIDI has
+    none), APPENDS one element to the 0x2624 `count==1` container (the new 0x2620)
+    AND one element to the 0x1058 `count==1` container (the new 0x1057). The appended
+    elements match the existing per-track elements' convention (tag1==4, one offset).
+    Returns a new list; `records` is not mutated."""
+    out = copy.deepcopy(records)
+
+    def append_marker(record: IndexRecord, times: int = 1) -> None:
+        for _ in range(times):
+            record.elements.append(Element(rel=0, tag1=0x04, offsets=[0]))
+
+    # NO 0x1015 (audio count unchanged) and NO 0x1054 (MIDI has 0 channels).
+    append_marker(_only(out, lambda r: r.content_type == 0x2519 and r.count == 1 and not r.child_refs))
+    # The two MIDI per-track container records carry one element per track (after a
+    # leading self-marker): the new track's 0x2620 playlist and 0x1057 MIDI-I/O.
+    append_marker(_only(out, lambda r: r.content_type == 0x2624 and r.count == 1 and not r.child_refs))
+    append_marker(_only(out, lambda r: r.content_type == 0x1058 and r.count == 1 and not r.child_refs))
+
+    # packed-offset table: its single element gains one offset (tag1 == 4*k)
+    table = _only(out, lambda r: r.content_type == 0x2519 and r.count == 2 and r.flag == 0)
+    table.elements[0].offsets.append(0)
+    table.elements[0].tag1 = 4 * len(table.elements[0].offsets)
+
+    # insert the new per-track 0x251a lane instance after the existing ones
+    lane_positions = [i for i, r in enumerate(out) if _is_lane_instance(r)]
+    out.insert(lane_positions[-1] + 1, _blank_clone(out[lane_positions[-1]], new_count))
+
+    # the fixed 0x251b/0x2716 records carry ordinal == track count
+    for record in out:
+        if record.content_type == 0x2519 and record.child_refs and record.child_refs[0].child_type in (0x251B, 0x2716):
+            record.ordinal = new_count
+
+    return out
+
+
 def synthesize_index_records(
     base_records: list[IndexRecord],
     base_count: int,
     target_count: int,
     channels: "int | list[int]" = 2,
     click_tracks: "set[int] | tuple[int, ...]" = (),
+    midi_tracks: "set[int] | tuple[int, ...]" = (),
 ) -> list[IndexRecord]:
     """Grow a `base_count`-track index record list to `target_count` tracks.
     `channels` is the per-added-track channel count: an int (uniform — every added
     track has that many channels) OR a list indexed by track number (1-based), so a
     MIXED session can be built track-by-track (e.g. `[2,1,2]` for stereo,mono,stereo)
     from a 1-track donor. `click_tracks` is the set of 1-based track positions that
-    are click tracks (added via `add_click_track` instead of `add_track`). Offsets in
-    new/grown holes are 0; fill them with `rebuild_index_offsets` (or `_fill_offsets`)
-    against the final layout."""
+    are click tracks (added via `add_click_track` instead of `add_track`).
+    `midi_tracks` is the set of 1-based track positions that are MIDI tracks (added
+    via `add_midi_track`). Offsets in new/grown holes are 0; fill them with
+    `rebuild_index_offsets` (or `_fill_offsets`) against the final layout."""
     records = base_records
     clicks = set(click_tracks)
+    midis = set(midi_tracks)
     for count in range(base_count + 1, target_count + 1):
         if count in clicks:
             records = add_click_track(records, count)
+        elif count in midis:
+            records = add_midi_track(records, count)
         else:
             ch = channels[count - 1] if isinstance(channels, (list, tuple)) else channels
             records = add_track(records, count, channels=ch)
@@ -554,6 +603,7 @@ def compose_index(
     channels: int = 2,
     track_names: "list[str] | None" = None,
     click_tracks: "set[int] | tuple[int, ...]" = (),
+    midi_tracks: "set[int] | tuple[int, ...]" = (),
 ) -> bytes:
     """Build the 0x0002 index for a `target_count`-track body from a
     `base_count`-track donor. `channels` = the audio channels per added track
@@ -570,7 +620,8 @@ def compose_index(
     donor_zt, donor_bt = block_layout(donor_data)
     donor_records = parse_records(donor_ref.data, set(donor_bt), set(donor_zt))
     synth = synthesize_index_records(donor_records, base_count, target_count,
-                                     channels=channels, click_tracks=click_tracks)
+                                     channels=channels, click_tracks=click_tracks,
+                                     midi_tracks=midi_tracks)
     records = _fill_offsets(donor_records, synth, donor_data, target_body_data, base_count,
                             track_names=track_names)
     return serialize_final_block(records)
@@ -705,13 +756,17 @@ def _fill_offsets(donor_records, synth, donor_data, target_data, base_count, tra
                 out = by_name_lane(0x251A, lane_track, lane)
             elif template:
                 out = remap_newtrack(tmpl_holes[hi], new_track)
+            elif record.content_type == 0x1058:
+                # the MIDI-I/O container's appended element targets the new 0x1057
+                out = pop_new(0x1057)
             else:
                 child = _CONTAINER_CHILD.get(record.content_type,
                                              0x251A if record.content_type == 0x2519 else None)
                 out = pop_new(child) if child is not None else 0
                 if out == 0 and record.content_type == 0x2624:
-                    # the click track's playlist-container marker targets 0x261e
-                    out = pop_new(0x261E)
+                    # the click track's playlist-container marker targets 0x261e;
+                    # a MIDI track's appended element targets the new 0x2620 playlist
+                    out = pop_new(0x261E) or pop_new(0x2620)
             hi += 1
             return out
 
