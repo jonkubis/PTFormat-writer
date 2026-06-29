@@ -2389,17 +2389,20 @@ def _raw_block_bounds(data: bytes, end0: int) -> "list[tuple[int, int, int]]":
     def descend(lo: int, hi: int) -> None:
         pos = lo
         while pos < hi:
-            if data[pos] == 0x5A:
-                block_type = int.from_bytes(data[pos + 1 : pos + 3], "little")
-                if not (block_type & 0xFF00):
-                    size = int.from_bytes(data[pos + 3 : pos + 7], "little")
-                    ct = int.from_bytes(data[pos + 7 : pos + 9], "little")
-                    end = (pos + 7) + size
-                    if size > 0 and end <= hi:
-                        out.append((pos, end, ct))
-                        descend(pos + 9, end)   # children begin after the ct word
-                        pos = end
-                        continue
+            nz = data.find(b"\x5a", pos, hi)   # C-speed jump to the next 0x5A
+            if nz < 0:
+                return
+            pos = nz
+            block_type = int.from_bytes(data[pos + 1 : pos + 3], "little")
+            if not (block_type & 0xFF00):
+                size = int.from_bytes(data[pos + 3 : pos + 7], "little")
+                ct = int.from_bytes(data[pos + 7 : pos + 9], "little")
+                end = (pos + 7) + size
+                if size > 0 and end <= hi:
+                    out.append((pos, end, ct))
+                    descend(pos + 9, end)   # children begin after the ct word
+                    pos = end
+                    continue
             pos += 1
 
     descend(0, end0)
@@ -3356,10 +3359,154 @@ def _set_index_offset(data: bytes) -> bytes:
     ref = _FI.final_index_ref(data)
     if ref is None:
         return data
-    ptf = parse(data)
-    first = min(flat_blocks(ptf), key=lambda b: b.offset)
+    # The first top-level block is the lowest-offset block; find it via the fast
+    # size-driven walk instead of the (much slower) scan parser. `Block.offset`
+    # equals `zmark + 7`, so the first block's offset is `min(zmark) + 7`.
+    bounds = _raw_block_bounds(data, ref.start)
+    first_offset = min(z for z, _e, _c in bounds) + 7
     out = bytearray(data)
-    out[first.offset : first.offset + 4] = int(ref.start).to_bytes(4, "little")
+    out[first_offset : first_offset + 4] = int(ref.start).to_bytes(4, "little")
+    return bytes(out)
+
+
+# --- in-place clip editing on arbitrary existing sessions --------------------
+#
+# Third-party sessions defeat the 0x5A-scan block parser (`parse`): it both
+# undercounts (misses real blocks whose payload never produced a scannable magic)
+# and invents phantoms (data bytes that look like 0x5A | small-type). The master
+# index then fails to frame. The fix is to enumerate blocks by their DECLARED
+# SIZE -- walk each block to `zmark + 7 + size` and recurse -- since the block
+# sizes make the stream self-describing. With size-driven zmarks every 0x0002 hole
+# resolves on real sessions, so we can edit + reindex them in place.
+
+def _size_driven_blocks(data: bytes) -> "list[tuple[int, int, int]]":
+    """Authoritative block enumeration by declared size. Returns sorted
+    `[(zmark, end, content_type)]` covering the body (everything before the
+    trailing 0x0002 index). Use this -- not `flat_blocks` -- on arbitrary
+    third-party sessions: it recovers the blocks the scan parser misses."""
+    ref = _FI.final_index_ref(data)
+    return sorted(_raw_block_bounds(data, ref.start))
+
+
+def _index_offset_holes(data: bytes) -> "tuple[list[tuple[int, int]], set[int]]":
+    """Every offset hole in the 0x0002 master index as `(abs_file_pos, target)`,
+    plus the authoritative zmark set. Frames the index with size-driven zmarks so
+    it parses real sessions (scan-parser zmarks leave child-refs unresolved)."""
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    zmarks = {z for z, _, _ in bl}
+    recs = _FI.parse_records(ref.data, {c for _, _, c in bl}, zmarks)
+    holes: "list[tuple[int, int]]" = []
+    for r in recs:
+        for c in r.child_refs:                       # offset at record-rel rel+2
+            holes.append((ref.start + r.start + c.rel + 2, c.offset))
+        for e in r.elements:                         # offsets at record-rel rel+5+4i
+            for i, o in enumerate(e.offsets):
+                holes.append((ref.start + r.start + e.rel + 5 + 4 * i, o))
+    return holes, zmarks
+
+
+def _lane_track_name(data: bytes, lane_zmark: int, lane_end: int) -> str:
+    """Track/lane name: the length-prefixed string in the lane head (`<u32 len><len
+    bytes>`). Read the exact length -- a greedy printable scan would swallow the
+    adjacent u32 placement-count byte (e.g. 'BRUSH 2' + count 104='h' -> 'BRUSH 2h')."""
+    p = lane_zmark + 9
+    end = min(lane_end, lane_zmark + 256)
+    while p + 4 <= end:
+        n = int.from_bytes(data[p : p + 4], "little")
+        if 1 <= n <= 64 and p + 4 + n <= len(data) and all(
+            32 <= b < 127 for b in data[p + 4 : p + 4 + n]
+        ):
+            return data[p + 4 : p + 4 + n].decode("latin1")
+        p += 1
+    return ""
+
+
+def clip_lanes(data: bytes) -> "list[tuple[int, str, int]]":
+    """Enumerate every audio-playlist lane (0x1052) holding clips, as
+    `(lane_zmark, track_name, n_clips)`. A clip is a 0x1050 placement nested in
+    the lane's byte range (lane -> 0x1050 placement -> 0x104f position). A track
+    can expose more than one lane with the same name (alternate playlists). Pass a
+    lane's zmark to `remove_clip`."""
+    bl = _size_driven_blocks(data)
+    placements = sorted((z, e) for z, e, c in bl if c == 0x1050)
+    out: "list[tuple[int, str, int]]" = []
+    for z, e, c in bl:
+        if c != 0x1052:
+            continue
+        n = sum(1 for pz, _pe in placements if z < pz < e)
+        if n:
+            out.append((z, _lane_track_name(data, z, e), n))
+    return out
+
+
+def _lane_count_pos(data: bytes, lane_zmark: int, first_placement: int,
+                    n_placements: int) -> "int | None":
+    """Offset of the lane's u32 placement-count field. It sits just before the
+    first placement (a u32 immediately after the lane name);
+    fall back to the last u32 == n in the lane head if the layout varies."""
+    if int.from_bytes(data[first_placement - 4 : first_placement], "little") == n_placements:
+        return first_placement - 4
+    for p in range(first_placement - 4, lane_zmark + 8, -1):
+        if int.from_bytes(data[p : p + 4], "little") == n_placements:
+            return p
+    return None
+
+
+def remove_clip(data: bytes, lane_zmark: int, clip_index: int) -> bytes:
+    """Remove one clip from the lane at `lane_zmark` in an ARBITRARY existing
+    session, leaving every other track/clip/plugin/automation byte-exact.
+
+    `clip_index` is the placement's rank in file order within the lane. Splices
+    out the placement (its 0x1050 wrapper + the 0x104f position child), decrements
+    the lane's u32 placement count, shrinks every enclosing block size, and slides
+    every master-index offset that sits past the cut. The clip's region/audio-file
+    records are intentionally left untouched (they linger in the clips bin, which
+    is harmless and matches deleting a clip from the timeline)."""
+    # One `final_index_ref` (the slow scan parser lives there); everything else is
+    # derived from the fast size-driven walk + the index it points at.
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    lane = next((b for b in bl if b[0] == lane_zmark and b[2] == 0x1052), None)
+    if lane is None:
+        raise ValueError(f"no 0x1052 lane at zmark {lane_zmark}")
+    lane_end = lane[1]
+    placements = sorted(
+        (pz, pe) for pz, pe, c in bl if c == 0x1050 and lane_zmark < pz < lane_end
+    )
+    if not 0 <= clip_index < len(placements):
+        raise ValueError(
+            f"clip_index {clip_index} out of range (lane has {len(placements)} clips)"
+        )
+    pz, pe = placements[clip_index]
+    cut = pe - pz
+    count_pos = _lane_count_pos(data, lane_zmark, placements[0][0], len(placements))
+    recs = _FI.parse_records(ref.data, {c for _z, _e, c in bl}, {z for z, _e, _c in bl})
+    out = bytearray(data[:pz] + data[pe:])
+    for z, e, _c in bl:                              # shrink enclosing block sizes
+        if z < pz and e >= pe:
+            out[z + 3 : z + 7] = (
+                int.from_bytes(out[z + 3 : z + 7], "little") - cut
+            ).to_bytes(4, "little")
+    if count_pos is not None:                        # decrement lane placement count
+        out[count_pos : count_pos + 4] = (
+            int.from_bytes(out[count_pos : count_pos + 4], "little") - 1
+        ).to_bytes(4, "little")
+    # The body shrank by `cut` at `pz`; every index offset that pointed past the cut
+    # shifts down by `cut`. Offsets before the cut are already correct in the copied
+    # tail, so only the shifted ones need rewriting (at their new position abs-cut).
+    def shift(abs_pos: int, val: int) -> None:
+        if val > pz:
+            out[abs_pos - cut : abs_pos - cut + 4] = (val - cut).to_bytes(4, "little")
+    for r in recs:
+        for c in r.child_refs:
+            shift(ref.start + r.start + c.rel + 2, c.offset)
+        for e in r.elements:
+            for i, o in enumerate(e.offsets):
+                shift(ref.start + r.start + e.rel + 5 + 4 * i, o)
+    # repoint the first block at the moved index (first block is before the cut)
+    first_offset = min(z for z, _e, _c in bl) + 7
+    out[first_offset : first_offset + 4] = (ref.start - cut).to_bytes(4, "little")
     return bytes(out)
 
 
