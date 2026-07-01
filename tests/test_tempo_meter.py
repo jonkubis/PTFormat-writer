@@ -394,5 +394,36 @@ class MapReadTests(unittest.TestCase):
         self.assertEqual(BS.base_meter(m2), BS.meter_map(m2)[0][:2])
 
 
+@unittest.skipUnless(_T140.exists() and _M34B2.exists(),
+                     "replace controls not present")
+class ReplaceMapTests(unittest.TestCase):
+    """`body_synth.replace_tempo_map` / `replace_meter_map` edit the conductor map of an
+    ARBITRARY session IN PLACE via the size-driven splice + offset-shift reindex (unlike the
+    synthesis-path set_*_map, which need top-level lanes and the scan parser). An identity
+    replace is byte-identical; a modify reads back exactly and reloads. Corpus-validated
+    26/26 (identity byte-exact, modify readback, index resolves, other blocks byte-intact)."""
+
+    def test_replace_tempo_identity_byte_exact(self) -> None:
+        d = _load_path(_T140)
+        self.assertEqual(BS.replace_tempo_map(d, BS.tempo_map(d)), d)
+
+    def test_replace_tempo_modify(self) -> None:
+        d = _load_path(_T140)
+        out = BS.replace_tempo_map(d, [(100.0, 0), (150.0, 2 * _TQ), (75.0, 5 * _TQ)])
+        self.assertEqual(_reload_ok(out), 0)
+        self.assertEqual([(round(b, 1), t) for b, t in BS.tempo_map(out)],
+                         [(100.0, 0), (150.0, 1920000), (75.0, 4800000)])
+
+    def test_replace_meter_identity_byte_exact(self) -> None:
+        d = _load_path(_M34B2)
+        self.assertEqual(BS.replace_meter_map(d, BS.meter_map(d)), d)
+
+    def test_replace_meter_modify(self) -> None:
+        d = _load_path(_M34B2)
+        out = BS.replace_meter_map(d, [(7, 8, 0), (5, 4, 4 * _TQ)])
+        self.assertEqual(_reload_ok(out), 0)
+        self.assertEqual(BS.meter_map(out), [(7, 8, 0), (5, 4, 3840000)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -511,6 +511,30 @@ record:
 Both recover PT-authored controls **exactly** (4/4→3/4 @bar2) and are sane across the corpus
 (up to 18 events). Each event also has a 16-byte entry in the `0x2719` trailing lane.
 
+### Replacing a conductor map on an arbitrary session — **(corpus-validated 26/26)**
+
+`body_synth.replace_tempo_map(data, [(bpm, tick), …])` and `replace_meter_map(data,
+[(num, den, tick), …])` rewrite the map on any real session in place. Unlike the synthesis
+writers (`set_*_map`, which need the scan parser + require the lanes), they resize the
+session's OWN top-level `0x2028`/`0x2029` (and the `0x2718`/`0x2719` lane **only when
+present**) and repair the master index with a pure **offset-shift** (the block count is
+unchanged) — the same reindex the clip edits use. Validated across all 26 corpus sessions:
+identity replace is **byte-identical**, a modify reads back exactly (`tempo_map`/`meter_map`),
+index holes resolve, every other block is byte-intact (`rc=0`; PT display confirmation
+pending). Details worth recording:
+
+- **The tempo lane `0x2718` wraps a *nested* `0x2028`** — resizing must bump that nested
+  block's own size (`nested+3`) too, not just the outer lane.
+- **Meter record `+8` = the absolute bar number** (`i32`), advanced from event 0's start bar
+  by **`ceil(tick_span / ticks_per_bar)`** (CEIL, not floor — a mid-bar change lands on the
+  next barline); the 16-byte lane entry holds the **start-relative** bar (`bar − start_bar +
+  1`). A replace **preserves the session's displayed start bar** (§5c), so THE WIND's `−2`
+  survives.
+- A meter record has an **opaque per-record byte at `+22`** (`0x03`/`0x04`, not derivable from
+  num/den/tick); an identity replace stays byte-exact by cloning surviving records per index.
+- An **empty (count 0) meter block** carries no record to clone, so a grow seeds from the
+  canonical template.
+
 ### Markers (`0x2030` list / `0x2077` record) — **(PT-confirmed, full read)**
 
 `0x2030` = `u32 count` + N × `0x2077`. Each `0x2077` marker record:

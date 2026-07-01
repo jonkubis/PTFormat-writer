@@ -2016,6 +2016,266 @@ def set_meter_map(data: bytes, events: "list[tuple[int, int, int]]",
     return bytes(out)
 
 
+# --- replace tempo/meter maps on an ARBITRARY existing session ---------------
+#
+# set_tempo_map/set_meter_map are the SYNTHESIS-path writers: they find the
+# conductor blocks via the scan parser (unreliable on real sessions) AND require
+# the optional 0x2718/0x2719 lanes. The functions below are the size-driven
+# counterparts: they resize the session's OWN top-level 0x2028/0x2029 (+ the lane
+# when present) in place and repair the master index with a pure offset-shift
+# (the block COUNT is unchanged), exactly as the clip edits do.
+
+# Canonical (session-invariant) meter RECORD (36 B) + trailing-list ENTRY (16 B),
+# used only to seed a grow of an EMPTY (count 0) meter block, which carries no
+# record of its own to clone. Lifted from the PT-confirmed METER_MAP_TEMPLATE; a
+# resize of that template to 1 record is byte-identical to a real count-1 block.
+_METER_REC_SEED = bytes.fromhex(
+    "0010a5d4e800000001000000040000000400000001000300000000000200000003000000")
+_METER_ENTRY_SEED = bytes.fromhex("01000000010000000000000000000000")
+
+
+def _resize_tempo_lane(block: bytes, n_records: int) -> bytes:
+    """Resize a tempo block to `n_records` 61-byte records, correct whether `block` is the
+    top-level 0x2028 map (records directly in it) OR the 0x2718 ruler lane (records inside a
+    nested 0x2028 sub-block). Reuses `_resize_tempo_block` for the record splice + count/
+    length + OUTER block_size, then additionally repairs the NESTED 0x2028 sub-block size
+    when the ruler wraps one (its own 5A..2028 header sits before the first record)."""
+    import struct
+    new = bytearray(_resize_tempo_block(block, n_records))
+    delta = len(new) - len(block)
+    if delta == 0:
+        return bytes(new)
+    rec0 = new.find(_TEMPO_REC_SIG)
+    nested, p = -1, 1
+    while True:
+        j = new.find(b"\x5a", p, rec0)
+        if j < 0:
+            break
+        ct = int.from_bytes(new[j + 7 : j + 9], "little")
+        bt = int.from_bytes(new[j + 1 : j + 3], "little")
+        if ct == 0x2028 and not (bt & 0xFF00) and j + 9 <= rec0:
+            nested = j
+        p = j + 1
+    if nested > 0:
+        struct.pack_into("<I", new, nested + 3,
+                         struct.unpack_from("<I", new, nested + 3)[0] + delta)
+    return bytes(new)
+
+
+def _resize_meter_safe(block: bytes, n_records: int) -> bytes:
+    """Resize a meter block to exactly `n_records` 36-byte records + `n_records` 16-byte
+    trailing entries, PRESERVING each surviving record's/entry's opaque bytes. Works on the
+    top-level 0x2029 map, the 0x2719 ruler (nested 0x2029), and an EMPTY (count 0) block.
+
+    A meter record carries an OPAQUE per-record field (byte +22 is 0x03/0x04 in the corpus,
+    not derivable from num/den/tick), so unlike `_resize_meter_block` (which clones record 0
+    N times and loses those bytes) we KEEP existing records/entries for the first
+    min(old_count, N) slots and seed extras from the canonical template -- making an identity
+    resize byte-exact. Updates count (@tag+13), length (@tag+9 = 12+52*N), the enclosing
+    0x2029 size (@tag-4), and the outer ruler size (@+3) when nested (tag != 7)."""
+    import struct
+    m = block.find(b") Meter\x02")
+    if m < 0:
+        return block
+    count = struct.unpack_from("<I", block, m + 13)[0]
+    rec0 = m + len(b") Meter\x02") + 1 + 4 + 4
+    old_recs = block[rec0 : rec0 + count * 36]
+    old_entries = block[rec0 + count * 36 : rec0 + count * 52]
+    tail = block[rec0 + count * 52 :]
+    rec_tpl = old_recs[:36] if count else _METER_REC_SEED
+    ent_tpl = old_entries[:16] if count else _METER_ENTRY_SEED
+    recs, ents = bytearray(), bytearray()
+    for i in range(n_records):
+        recs += old_recs[i * 36 : i * 36 + 36] if i < count else rec_tpl
+        ents += old_entries[i * 16 : i * 16 + 16] if i < count else ent_tpl
+    new = bytearray(block[:rec0] + bytes(recs) + bytes(ents) + tail)
+    delta = len(new) - len(block)
+    struct.pack_into("<I", new, m + 13, n_records)
+    struct.pack_into("<I", new, m + 9, 12 + 52 * n_records)
+    struct.pack_into("<I", new, m - 4, struct.unpack_from("<I", new, m - 4)[0] + delta)
+    if m != 7:
+        struct.pack_into("<I", new, 3, struct.unpack_from("<I", new, 3)[0] + delta)
+    return bytes(new)
+
+
+def _rewrite_tempo_records(block: bytes, events) -> bytes:
+    """Overwrite the per-event fields of a tempo block (0x2028 map OR 0x2718 ruler) after it
+    was resized to len(events) records: flag @+21 & @+39 (=1 for event0 else 0), tick 5-byte
+    @+30 (ZERO_TICKS+tick), bpm f64 @+40 -- mirrors set_tempo_map's loop."""
+    import struct
+    out = bytearray(block)
+    recs, i = [], out.find(_TEMPO_REC_SIG)
+    while i >= 0 and out[i : i + len(_TEMPO_REC_SIG)] == _TEMPO_REC_SIG:
+        recs.append(i)
+        i += 61
+    if len(recs) != len(events):
+        raise ValueError(f"tempo block has {len(recs)} records, expected {len(events)}")
+    for idx, ((bpm, tick), r) in enumerate(zip(events, recs)):
+        flag = 1 if idx == 0 else 0
+        out[r + 21] = flag
+        out[r + 39] = flag
+        out[r + 30 : r + 35] = (_ZERO_TICKS + int(tick)).to_bytes(5, "little")
+        out[r + 40 : r + 48] = struct.pack("<d", float(bpm))
+    return bytes(out)
+
+
+def _meter_bar_numbers(events, start_bar: int) -> "list[int]":
+    """Absolute bar number of each meter event. Event 0 is `start_bar` (the session's
+    displayed first bar; usually 1, but PT can renumber, e.g. -2). Each later event's bar
+    advances by the whole bars elapsed under the PREVIOUS meter across the tick span, rounded
+    UP (a change landing mid-bar is placed at the following barline):
+    `bars += ceil(tick_delta / ticks_per_bar)`, `ticks_per_bar = num * (960000*4 // den)`.
+    CEIL (not floor) reproduces the stored +8/+0 bar fields exactly across the corpus."""
+    bars = [int(start_bar)]
+    for k in range(1, len(events)):
+        pnum, pden, ptick = events[k - 1]
+        tpb = pnum * (TICKS_PER_QUARTER * 4 // pden)
+        span = events[k][2] - ptick
+        bars.append(bars[-1] + (-(-span // tpb) if tpb else 0))   # ceil division
+    return bars
+
+
+def _rewrite_meter_records(block: bytes, events, start_bar: int) -> bytes:
+    """Overwrite the per-event fields of a meter block (0x2029 map OR 0x2719 ruler) after a
+    resize to len(events) records: per record tick 5-byte @+0 (ZERO_TICKS+tick), ABSOLUTE bar
+    number @+8 (i32, see `_meter_bar_numbers` -- PT can renumber the first bar), num @+12,
+    den @+16. Each 16-byte trailing entry @+0 carries the bar RELATIVE to the session start
+    (`bar[i] - start_bar + 1`, a 1-based index; == the absolute bar only when start_bar==1)."""
+    out = bytearray(block)
+    m = out.find(b") Meter\x02")
+    if m < 0:
+        return bytes(out)
+    rec0 = m + len(b") Meter\x02") + 1 + 4 + 4
+    n = len(events)
+    bars = _meter_bar_numbers(events, start_bar)
+    for i, (num, den, tick) in enumerate(events):
+        r = rec0 + i * 36
+        out[r : r + 5] = (_ZERO_TICKS + int(tick)).to_bytes(5, "little")
+        out[r + 8 : r + 12] = int(bars[i]).to_bytes(4, "little", signed=True)
+        out[r + 12 : r + 16] = int(num).to_bytes(4, "little")
+        out[r + 16 : r + 20] = int(den).to_bytes(4, "little")
+    trail0 = rec0 + n * 36
+    for i in range(n):
+        out[trail0 + i * 16 : trail0 + i * 16 + 4] = (
+            bars[i] - int(start_bar) + 1).to_bytes(4, "little", signed=True)
+    return bytes(out)
+
+
+def _splice_and_reindex(data: bytes, replacements) -> bytes:
+    """Splice one or more resized top-level blocks into `data` and repair the master index
+    for the net size delta (a pure offset-shift -- the block COUNT is unchanged). Each
+    `replacements` item is `(zmark, old_end, new_block_bytes)` for a block whose OWN zmark is
+    unchanged (only its trailing records grew/shrank). Mirrors remove_clip/add_clip's reindex:
+    splice the bytes, slide every master-index offset that points PAST a splice by the
+    cumulative delta, and repoint the first block at the moved index."""
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    recs = _FI.parse_records(ref.data, {c for _z, _e, c in bl}, {z for z, _e, _c in bl})
+    edits = sorted((z, old_end - z, nb) for z, old_end, nb in replacements)
+
+    out = bytearray()
+    prev = 0
+    for z, cut, nb in edits:
+        out += data[prev:z]
+        out += nb
+        prev = z + cut
+    out += data[prev:]
+
+    def delta_before(pos: int) -> int:
+        return sum(len(nb) - cut for z, cut, nb in edits if z < pos)
+
+    def shift(abs_pos: int, val: int) -> None:
+        d = delta_before(val)
+        if d == 0:
+            return
+        na = abs_pos + delta_before(abs_pos + 1)
+        out[na : na + 4] = (val + d).to_bytes(4, "little")
+
+    for r in recs:
+        for c in r.child_refs:
+            shift(ref.start + r.start + c.rel + 2, c.offset)
+        for el in r.elements:
+            for i, o in enumerate(el.offsets):
+                shift(ref.start + r.start + el.rel + 5 + 4 * i, o)
+
+    first_offset = min(z for z, _e, _c in bl) + 7
+    total_delta = sum(len(nb) - cut for _z, cut, nb in edits)
+    out[first_offset : first_offset + 4] = (ref.start + total_delta).to_bytes(4, "little")
+    return bytes(out)
+
+
+def replace_tempo_map(data: bytes, events: "list[tuple[float, int]]") -> bytes:
+    """Replace the tempo (conductor) map of an ARBITRARY existing session with `events` =
+    `[(bpm, tick), ...]` (tick in PT conductor ticks; the first event is the session start,
+    tick 0), leaving everything else byte-intact. Rewrites the top-level 0x2028 "Tempo" block
+    and, when present, the 0x2718 tempo ruler, then repairs the master index for the size
+    delta (offset-shift). An identity replace (`replace_tempo_map(d, tempo_map(d))`) is
+    byte-identical; a modify reads back exactly via `tempo_map`. Corpus-validated across all
+    26 sessions (rc=0, readback exact, index resolves, other blocks byte-intact); PT display
+    confirmation pending. Returns full unxored bytes."""
+    n = len(events)
+    if n < 1:
+        raise ValueError("events must be non-empty (the first event is the start tempo)")
+    ref = _FI.final_index_ref(data)
+    if ref is None:
+        raise ValueError("data has no trailing 0x0002 master index")
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    lanes = [(z, e) for z, e, c in bl if c == 0x2718]
+    top = None
+    for z, e, c in bl:
+        if c == 0x2028 and data[z + 9 : z + 14] == b"Tempo" and not any(
+                lz < z and le >= e for lz, le in lanes):
+            top = (z, e)
+            break
+    if top is None:
+        raise ValueError("no top-level 0x2028 tempo block")
+    tz, te = top
+    replacements = [(tz, te, _rewrite_tempo_records(_resize_tempo_lane(data[tz:te], n), events))]
+    if lanes:
+        lz, le = lanes[0]
+        replacements.append(
+            (lz, le, _rewrite_tempo_records(_resize_tempo_lane(data[lz:le], n), events)))
+    return _splice_and_reindex(data, replacements)
+
+
+def replace_meter_map(data: bytes, events: "list[tuple[int, int, int]]") -> bytes:
+    """Replace the meter (conductor) map of an ARBITRARY existing session with `events` =
+    `[(numerator, denominator, tick), ...]` (tick in PT conductor ticks; the first event is
+    the session start, tick 0), leaving everything else byte-intact. Rewrites the top-level
+    0x2029 "Meter" block and, when present, the 0x2719 meter ruler, then repairs the master
+    index. Preserves the session's displayed first bar (event 0's +8, which PT may renumber,
+    e.g. -2; §5c). An empty (count 0) map is grown from the canonical template. Identity
+    replace is byte-identical; a modify reads back exactly via `meter_map`. Corpus-validated
+    across all 26 sessions; PT display confirmation pending. Returns full unxored bytes."""
+    n = len(events)
+    if n < 1:
+        raise ValueError("events must be non-empty (the first event is the start meter)")
+    ref = _FI.final_index_ref(data)
+    if ref is None:
+        raise ValueError("data has no trailing 0x0002 master index")
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    lanes = [(z, e) for z, e, c in bl if c == 0x2719]
+    top = None
+    for z, e, c in bl:
+        if c == 0x2029 and data[z + 9 : z + 14] == b"Meter" and not any(
+                lz < z and le >= e for lz, le in lanes):
+            top = (z, e)
+            break
+    if top is None:
+        raise ValueError("no top-level 0x2029 meter block")
+    tz, te = top
+    old_count = int.from_bytes(data[tz + 20 : tz + 24], "little")
+    start_bar = (int.from_bytes(data[tz + 32 : tz + 36], "little", signed=True)
+                 if old_count >= 1 else 1)
+    replacements = [
+        (tz, te, _rewrite_meter_records(_resize_meter_safe(data[tz:te], n), events, start_bar))]
+    if lanes:
+        lz, le = lanes[0]
+        replacements.append(
+            (lz, le, _rewrite_meter_records(_resize_meter_safe(data[lz:le], n), events, start_bar)))
+    return _splice_and_reindex(data, replacements)
+
+
 _MARKER_CT = 0x2077  # a marker record block inside the 0x2030 marker list
 
 

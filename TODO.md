@@ -25,12 +25,23 @@ declared block size (`zmark+3`) lagging its record count — scan-parser-tolerat
 PT-valid, but the readers bound by `count` not the declared end to compensate; worth fixing
 the size field for cleanliness.
 
+**Replacing a map on an ARBITRARY session is shipped:** `body_synth.replace_tempo_map(data,
+[(bpm,tick),…])` / `replace_meter_map(data, [(num,den,tick),…])` resize the session's own
+top-level `0x2028`/`0x2029` (+ the `0x2718`/`0x2719` lane when present) in place and offset-
+shift the master index (block count unchanged). Corpus-validated 26/26 (identity byte-exact,
+modify readback exact, holes resolve, others byte-intact, rc=0; PT display pending). Findings
+folded into spec §10: the tempo lane wraps a nested `0x2028` (its own size needs bumping),
+meter `+8` = absolute bar via CEIL(tick_span/ticks_per_bar) with the lane entry start-relative,
+an opaque per-record byte @+22, and empty-block template seeding. The replace preserves the
+displayed start bar, so a renumbered session round-trips.
+
 Still open (need Pro Tools ground truth):
-- **Writing** a renumbered start bar: the read side is solved (event-0 `i32` start bar). Author
-  a renumbered session in PT and confirm what else moves before writing it (see §5c open item).
-- **Replacing** a map on an ARBITRARY (non-donor) session: `set_tempo_map`/`set_meter_map`
-  still expect top-level `0x2718`/`0x2719` (synthesis path) and fail on real sessions — port
-  them to the size-driven reindex now that the record layout is confirmed.
+- **Writing a NEW renumbered start bar** (changing the displayed first bar, not just preserving
+  it): the read + preserve sides are solved (event-0 `i32`), but authoring a *different* start
+  needs PT to confirm what else moves (the empty-meter case, and whether anything outside the
+  meter block references it) — see §5c.
+- **Cleanliness:** fix `set_tempo_map`'s stale `0x2028` size field (the size-driven readers work
+  around it, but real sessions keep it consistent).
 - **Empty meter map** (`count==0`, e.g. COGNAC/MANOLITO): the i32 field only exists when
   there's ≥1 meter event. Renumber such a session in PT and find where the value lands
   (a forced `count=1` event, or a session-setup block like `0x2305`/`0x230A`?).
