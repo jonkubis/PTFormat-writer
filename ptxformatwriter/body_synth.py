@@ -4299,6 +4299,74 @@ def validate(data: bytes) -> "list[dict]":
     return out
 
 
+def _all_ordinal_lists(data: bytes, z: int, e: int) -> "list[dict]":
+    """Every `<ALL>` ordinal list inside block `[z, e)`. These drive both 0x202a and 0x202b
+    (the two 0x202a blocks are the two size-walk children of the single 0x202b, sharing the SAME
+    physical bytes). Layout relative to the ASCII `<ALL>` marker: 5 marker + 7 fixed + 2
+    count(u16) + 2 pad + count*2 ordinals(u16) + `fe ff …` trailer. Ordinals are positional
+    identity (ord[i] == i). Returns dicts with absolute offsets: count_pos, count, ords_start,
+    ords_end."""
+    out: "list[dict]" = []
+    p = z
+    while True:
+        a = data.find(b"<ALL>", p, e)
+        if a < 0:
+            break
+        cp = a + 5 + 7
+        count = int.from_bytes(data[cp : cp + 2], "little")
+        ords_start = cp + 2 + 2
+        out.append({"count_pos": cp, "count": count,
+                    "ords_start": ords_start, "ords_end": ords_start + 2 * count})
+        p = a + 1
+    return out
+
+
+def _fix_all_ordinal_counts(data: bytes) -> bytes:
+    """Set each 0x202b `<ALL>` list's u16 count to its actual ordinal count (bounded by the
+    `fe ff` trailer) after an inline splice/insert changed the list length; this also fixes the
+    two nested 0x202a lists (same physical bytes). Size-neutral, idempotent."""
+    ref = _FI.final_index_ref(data)
+    out = bytearray(data)
+    for z, e, c in sorted(_raw_block_bounds(data, ref.start)):
+        if c != 0x202B:
+            continue
+        p = z
+        while True:
+            a = out.find(b"<ALL>", p, e)
+            if a < 0:
+                break
+            ords_start = a + 5 + 7 + 2 + 2
+            tr = out.find(b"\xfe\xff", ords_start, e)
+            if tr >= 0:
+                out[a + 5 + 7 : a + 5 + 9] = ((tr - ords_start) // 2).to_bytes(2, "little")
+            p = a + 1
+    return bytes(out)
+
+
+def _fix_name_table_intergroup(data: bytes) -> bytes:
+    """Set the 0x2519 framed inter-group `u32` (the count between the two groups of N framed
+    0x251A entries) to the actual first-group child count — the unique `fe ff <u32> 5a 0a 00`
+    inside 0x2519. Size-neutral, idempotent. (`_fix_name_table_count` fixes only the header
+    count u16 at payload+0x0e, a different field.)"""
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    out = bytearray(data)
+    z, e = [(z, e) for z, e, c in bl if c == 0x2519][0]
+    group1 = len([cz for cz, ce, cc in bl if z < cz < e and cc == 0x251A]) // 2
+    seg = bytes(out[z:e])
+    m = 0
+    while True:
+        m = seg.find(b"\xfe\xff", m)
+        if m < 0:
+            break
+        p = m + 2
+        if seg[p : p + 3] != b"\x5a\x0a\x00" and seg[p + 4 : p + 7] == b"\x5a\x0a\x00":
+            out[z + p : z + p + 4] = group1.to_bytes(4, "little")
+            break
+        m += 1
+    return bytes(out)
+
+
 def remove_track(data: bytes, track_name: str) -> bytes:
     """Remove an AUDIO track (with all its clips) from an arbitrary session, leaving every
     other track/clip/plugin/automation intact.
@@ -4388,6 +4456,31 @@ def remove_track(data: bytes, track_name: str) -> bytes:
             if 0 <= rank < len(s2589):
                 ident.add(s2589[rank])
 
+    # ---- INLINE per-track splices (byte-ranges added to nt_ranges, NOT whole blocks) ----
+    # (a) 0x202a/0x202b <ALL> ordinal lists: drop the LAST 2-byte ordinal of each (identity
+    #     means "last" == the removed rank). Operate on the 0x202b container so both nested
+    #     0x202a lists (same physical bytes) are covered; the container shrink handles the sizes.
+    for z, e, c in bl:
+        if c == 0x202B:
+            for lst in _all_ordinal_lists(data, z, e):
+                nt_ranges.append((lst["ords_end"] - 2, lst["ords_end"]))
+    # (b) 0x2519 header ordinal: ONLY when the removed track was the LAST header entry (its ord
+    #     was the special-last 2-byte form). Removing it strands the NEW last survivor with a
+    #     full 4-byte ordinal -> truncate to 2 bytes. A non-last removal leaves the special-last.
+    all_names = [t.name for t in track_types(data)]
+    if all_names and all_names[-1] == track_name:
+        surviving = [n for n in all_names if n != track_name]
+        if surviving:
+            snb = surviving[-1].encode()
+            z2519, e2519 = [(z, e) for z, e, c in bl if c == 0x2519][0]
+            fc = min((cz for cz, ce, cc in bl if z2519 < cz < e2519), default=e2519)
+            k = data.find(snb, z2519, fc)
+            while k >= 0 and not (k >= 4 and int.from_bytes(data[k - 4:k], "little") == len(snb)):
+                k = data.find(snb, k + 1, fc)
+            if k >= 0:
+                ord_pos = k + len(snb) + 18       # name_end + 6 fixed + 4 tag + 8 guid
+                nt_ranges.append((ord_pos + 2, ord_pos + 4))
+
     # outermost removed blocks (a subtree parent covers its children) + the name-table entries
     ranges = [(z, zend[z]) for z in ident
               if not any(zz < z and zend[zz] >= zend[z] for zz in ident if zz != z)]
@@ -4440,8 +4533,10 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                 el.offsets = offs
                 new_elems.append(el)
         r.elements = new_elems
-    return _fix_name_table_count(_fix_container_counts(
-        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))))
+    out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+    out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
+    out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32
+    return _fix_name_table_count(_fix_container_counts(out))
 
 
 def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
@@ -4461,6 +4556,7 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
     — rename/reorder first). Validated so the per-track block delta equals a real session's,
     the EOS simulator (`validate`) is clean, rc=0, the round-trip (`duplicate_track` then
     `remove_track(new_name)`) is byte-identical, and every other block is byte-intact."""
+    import struct
     if len(new_name) != len(source_track):
         raise ValueError("v1: new_name must be the same length as source_track")
     ref = _FI.final_index_ref(data)
@@ -4559,6 +4655,15 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                    if not any(zz < z and zend[zz] >= zend[z] for zz in ident if zz != z))
     inserts = [(e, transform(data[z:e]), z) for z, e in units]
     inserts += [(b, transform(data[a:b]), None) for a, b in nt_ranges]
+
+    # ---- INLINE per-track inserts (inverse of remove_track's <ALL> splices) ----
+    # append one u16 == N (the new last index) before each 0x202a/0x202b <ALL> trailer, so the
+    # copy's ordinal records equal a valid track's; identity ordinals stay dense [0..N].
+    ncount = len(track_types(data))
+    for z, e, c in bl:
+        if c == 0x202B:
+            for lst in _all_ordinal_lists(data, z, e):
+                inserts.append((lst["ords_end"], struct.pack("<H", ncount), None))
     inserts.sort()
 
     def shift(o: int) -> int:
@@ -4610,8 +4715,10 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                 if o in ident:
                     no.append((copy_off(o), True))
             el.offsets = [o if is_copy else shift(o) for o, is_copy in no]
-    return _fix_name_table_count(_fix_container_counts(
-        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))))
+    out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+    out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
+    out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32
+    return _fix_name_table_count(_fix_container_counts(out))
 
 
 # --- arbitrary track naming --------------------------------------------------

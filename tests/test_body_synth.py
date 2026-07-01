@@ -972,6 +972,34 @@ class ContainerCountValidatorTests(unittest.TestCase):
         # the FULL per-track block-set round-trips: duplicate then remove is byte-identical
         self.assertEqual(BS.remove_track(BS.duplicate_track(b, "Bass", "Bas2"), "Bas2"), b)
 
+    def test_remove_last_track_is_byte_identical_to_valid(self):
+        """DEFINITIVE: removing the LAST track of synth(N+1) yields output byte-identical
+        (mod random GUIDs) to synth(N) -- i.e. it IS a real valid session's bytes."""
+        from collections import defaultdict
+        def norm(b):
+            b = bytearray(b); k = 0
+            while True:
+                k = b.find(b"\x2a\x00\x00\x00", k)
+                if k < 0:
+                    break
+                if k + 12 <= len(b):
+                    b[k + 4 : k + 12] = b"\x00" * 8
+                k += 1
+            return bytes(b)
+        def bt(d):
+            m = defaultdict(list)
+            for z, e, c in BS._size_driven_blocks(d):
+                m[c].append(norm(d[z:e]))
+            return m
+        n = ["Kick", "Snare", "Bass", "Gtr", "Keys", "Vox", "Perc", "FX"]
+        base9 = BS.set_track_names(BS.synthesize_stereo_inline(9), n + ["Aux"])
+        synth8 = BS.set_track_names(BS.synthesize_stereo_inline(8), n)
+        A, B = bt(BS.remove_track(base9, "Aux")), bt(synth8)
+        diffs = [(c, i) for c in set(A) | set(B)
+                 for i in range(min(len(A.get(c, [])), len(B.get(c, []))))
+                 if c < 0x4b00 and A[c][i] != B[c][i]]
+        self.assertEqual(diffs, [])
+
     def test_track_edits_match_valid_structure(self):
         """A duplicate's per-track block delta equals a real N+1-track session's (real block
         types only; the size-walk's phantom 0x4b48/0x5xxx artifacts are ignored)."""
