@@ -4533,6 +4533,12 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                 el.offsets = offs
                 new_elems.append(el)
         r.elements = new_elems
+    # Pruning + offset-shift above is INCOMPLETE: it leaves the removed track's now-empty
+    # per-track records in place and strands the two per-record counts that encode the OLD
+    # track count. `rebuild_after_track_drop` drops the dead records and re-ranks the
+    # track-count ordinal (the packed-offset table's `tag1` count is derived at serialize
+    # time), making the whole index byte-identical to synth(new_count).
+    recs = _FI.rebuild_after_track_drop(recs, len(all_names) - 1)
     out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
     out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
     out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32
@@ -4551,11 +4557,18 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
     enclosing containers and re-syncs their child-counts; and adds the new blocks' master-index
     references. The copy shares the source's clips/regions (a true duplicate).
 
+    The rebuilt master index is CANONICAL — byte-identical to a fresh
+    `synthesize_stereo_inline(N+1)` of the same track layout (the new track's records are
+    added with proper separate elements/instance records ordered by body rank, not doubled
+    in place), via `final_index.canonicalize_after_track_add`. `remove_track` is its exact
+    inverse, so the round-trip stays byte-exact.
+
     v1 constraints: `new_name` must be the SAME LENGTH as `source_track`; audio tracks only;
     unique source name; cannot duplicate the last track in the name table (short-trailer entry
     — rename/reorder first). Validated so the per-track block delta equals a real session's,
     the EOS simulator (`validate`) is clean, rc=0, the round-trip (`duplicate_track` then
-    `remove_track(new_name)`) is byte-identical, and every other block is byte-intact."""
+    `remove_track(new_name)`) is byte-identical, the index equals synth(N+1), and every other
+    block is byte-intact."""
     import struct
     if len(new_name) != len(source_track):
         raise ValueError("v1: new_name must be the same length as source_track")
@@ -4697,13 +4710,17 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
             ).to_bytes(4, "little")
 
     recs = _FI.parse_records(ref.data, set(zct.values()), set(zct))
+    copy_childref_offsets: "set[int]" = set()   # offset VALUES the copy introduced (childrefs)
+    copy_element_offsets: "set[int]" = set()     # ...and elements — used by the canonicalizer
     for r in recs:                                   # add a copy ref per source ref; shift the rest
         ncr = []
         for c in r.child_refs:
             ncr.append((c, False))
             if c.offset in ident:
+                co = copy_off(c.offset)
+                copy_childref_offsets.add(co)
                 ncr.append((_FI.ChildRef(rel=0, child_type=c.child_type,
-                                         offset=copy_off(c.offset), flags=c.flags), True))
+                                         offset=co, flags=c.flags), True))
         for c, is_copy in ncr:
             if not is_copy:
                 c.offset = shift(c.offset)
@@ -4713,8 +4730,21 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
             for o in el.offsets:
                 no.append((o, False))
                 if o in ident:
-                    no.append((copy_off(o), True))
+                    co = copy_off(o)
+                    copy_element_offsets.add(co)
+                    no.append((co, True))
             el.offsets = [o if is_copy else shift(o) for o, is_copy in no]
+    # The loop above produced the REVERSIBLE doubled-offset index (copy offset spliced
+    # beside each source offset). Canonicalize it to the fresh-synth(N+1) shape so the
+    # duplicate's index is byte-identical to synth(N+1): split the doubled elements/instance
+    # records into separate single-offset ones ordered by body rank, and re-rank the
+    # per-track ordinals. `rebuild_after_track_drop` is its exact inverse, so the
+    # duplicate→remove round-trip stays byte-exact.
+    dup_body = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+    _z2t, by_type = _FI.block_layout(dup_body)
+    block_ranks = {ct: {z: i for i, z in enumerate(zs)} for ct, zs in by_type.items()}
+    recs = _FI.canonicalize_after_track_add(
+        recs, block_ranks, copy_childref_offsets | copy_element_offsets)
     out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
     out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
     out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32

@@ -172,7 +172,13 @@ def serialize_record(record: IndexRecord) -> bytes:
         out += b"\x00\x00\x00"
     out += len(record.elements).to_bytes(4, "little")
     for element in record.elements:
-        out += bytes([0x01]) + element.tag1.to_bytes(2, "little")  # tag1 is u16 (= 4*offsets); >=64 needs the high byte
+        # tag1 is a u16 == 4 * (number of offsets) in EVERY valid session (verified across
+        # synth 8..20 and 120 corpus sessions: no element ever has tag1 != 4*len(offsets)).
+        # It is a DERIVED count, not a free field, so emit it from len(offsets) rather than the
+        # stored value — otherwise an editor that adds/removes an offset (e.g. remove_track
+        # dropping the packed-offset table's dead entry) leaves a stale tag1 (the 0x24-vs-0x20
+        # "36 vs 32" diff). Deriving it is a byte-exact no-op on already-valid input.
+        out += bytes([0x01]) + (4 * len(element.offsets)).to_bytes(2, "little")
         out += len(element.offsets).to_bytes(2, "little")
         for offset in element.offsets:
             out += offset.to_bytes(4, "little")
@@ -202,6 +208,193 @@ def replace_final_index(data: bytes, records: list[IndexRecord]) -> bytes:
     if ref is None:
         return data
     return data[: ref.start] + serialize_final_block(records)
+
+
+# --- the rank rebuild a TRACK REMOVAL needs ----------------------------------
+#
+# `remove_track` prunes each record's child_refs/element-offsets that pointed into a
+# removed byte-range and offset-shifts the survivors. That is INCOMPLETE: it leaves the
+# removed track's per-track records present-but-empty, and it never re-ranks the two
+# derived per-record counts that encode the OLD track count. This finishes the job so
+# the whole index is byte-identical (mod GUID) to a freshly-synthesized session of the
+# new track count. Reverse-engineered + verified byte-exact against synth 8 (last-track
+# removal from base9) and confirmed against the 120-corpus record grammar.
+
+
+def _is_dead_after_drop(record: IndexRecord) -> bool:
+    """Whether `record` must be DROPPED after a track removal emptied its element list.
+
+    A removed track's per-track records (its 0x2519 lane instance, its 0x2624 playlist
+    instance) had their offsets pointing into the removed byte-range, so `remove_track`
+    strips every element but CANNOT drop the record — it may still carry a child_ref
+    whose target lay OUTSIDE the removed range (e.g. the lane instance's 0x251a childref,
+    the playlist instance's 0x261c childref). The record is nonetheless dead: a VALID
+    session never has a record with zero elements (verified — synth 8..30 and 120
+    corpus sessions all have ZERO element-less records; child_refs-but-no-elements is
+    likewise never legitimate). So "no elements" is the exact, safe drop predicate."""
+    return not record.elements
+
+
+def _is_lane_instance_record(record: IndexRecord) -> bool:
+    """A per-track 0x251a lane instance: `ordinal == its 1-based track position`."""
+    return (record.content_type == 0x2519 and record.count == 2 and record.flag == 1
+            and record.child_refs and record.child_refs[0].child_type == 0x251A)
+
+
+def _is_playlist_instance_record(record: IndexRecord) -> bool:
+    """A per-track playlist instance (audio 0x261c / click 0x261e / MIDI 0x2620):
+    `ordinal == its 1-based track position`."""
+    return (record.content_type == 0x2624 and record.count == 4
+            and record.child_refs and record.child_refs[0].child_type in (0x261C, 0x261E, 0x2620))
+
+
+def rebuild_after_track_drop(records: list[IndexRecord], new_track_count: int) -> list[IndexRecord]:
+    """Finish `remove_track`'s partial index rebuild so the result equals synth(new_count).
+
+    Applies the three remaining rank fixes (offset pruning/shifting is done by the caller,
+    and the tag1 count is derived by `serialize_record`, so neither is handled here):
+
+      1. DROP dead records — any record left with no elements (`_is_dead_after_drop`).
+         These are the removed track's now-empty per-track lane/playlist records.
+      2. RE-RANK per-track ORDINALS for a MIDDLE removal. The lane (0x2519/0x251a) and
+         playlist (0x2624) instances carry `ordinal == their 1-based track position`. The
+         dropped dead records ARE the removed track's instances, so their ordinal is the
+         removed position within each family; every survivor in that family whose ordinal
+         is greater must be decremented by the number of removed same-family positions
+         below it. (A LAST-track removal drops the MAX ordinal, so nothing shifts — a
+         no-op, which is why last-track removal was already byte-exact before this fix;
+         only MIDDLE removals stranded the trailing ordinals one too high.)
+      3. RE-RANK the track-count ORDINAL — every 0x2519 record whose first child_ref is
+         0x251B or 0x2716 carries `ordinal == track count` (the 0x251b/0x251c/0x2716
+         "fixed" records; this is the exact set `add_track` bumps on the way up). A
+         removal must decrement them to `new_track_count`, or they strand the old count.
+
+    Returns a NEW list; `records` is not mutated. Byte-exact vs synth(new_count)."""
+    removed_lane_ords = sorted(r.ordinal for r in records
+                               if _is_dead_after_drop(r) and _is_lane_instance_record(r))
+    removed_playlist_ords = sorted(r.ordinal for r in records
+                                   if _is_dead_after_drop(r) and _is_playlist_instance_record(r))
+    out = [r for r in records if not _is_dead_after_drop(r)]
+
+    def _decrement(ordinal: int, removed: list[int]) -> int:
+        return ordinal - sum(1 for ro in removed if ro < ordinal)
+
+    for record in out:
+        if _is_lane_instance_record(record):
+            record.ordinal = _decrement(record.ordinal, removed_lane_ords)
+        elif _is_playlist_instance_record(record):
+            record.ordinal = _decrement(record.ordinal, removed_playlist_ords)
+    for record in out:
+        if (record.content_type == 0x2519 and record.child_refs
+                and record.child_refs[0].child_type in (0x251B, 0x2716)):
+            record.ordinal = new_track_count
+    return out
+
+
+# --- the canonical rebuild a TRACK DUPLICATION needs -------------------------
+#
+# `duplicate_track` copies the source track's per-track blocks and, in a first pass,
+# rebuilds the master index by DOUBLING each source offset in place (the copy's offset
+# spliced right after the source's, within the SAME element / instance record). That is
+# reversible (which is why the duplicate→remove round-trip is byte-exact) but NOT the
+# canonical shape a fresh synth(N+1) has: synth appends a SEPARATE single-offset element
+# per track and a SEPARATE per-track instance record, with the container's track-elements
+# and the instance records ordered by BODY RANK (the physical zmark order of the target
+# blocks), and per-track ordinals following that same order. `canonicalize_after_track_add`
+# converts the doubled index into that canonical form so the duplicate's index is
+# byte-identical to synth(N+1). Reverse-engineered + verified byte-exact against synth 9
+# (duplicating any middle track of synth 8) and confirmed round-trip-reversible by the
+# (now canonical) `rebuild_after_track_drop`.
+
+
+def _container_child_type(record: IndexRecord) -> "int | None":
+    """The block type a `count==1, no-child_refs` container's track-elements point at
+    (0x1015→0x1014, 0x1054→0x1052, 0x2519→0x251a, 0x2624→0x261c), else None."""
+    if record.count != 1 or record.child_refs:
+        return None
+    return {0x1015: 0x1014, 0x1054: 0x1052, 0x2519: 0x251A, 0x2624: 0x261C}.get(record.content_type)
+
+
+def canonicalize_after_track_add(
+    records: list[IndexRecord],
+    block_ranks: "dict[int, dict[int, int]]",
+    copy_offsets: set[int],
+) -> list[IndexRecord]:
+    """Turn `duplicate_track`'s doubled-offset index into the canonical synth(N+1) shape.
+
+    `block_ranks` maps content_type -> {zmark_offset: body_rank} (from `block_layout`).
+    `copy_offsets` is the set of offset VALUES the copy introduced (each `copy_off` output),
+    used to tell an original offset from its copy when splitting a doubled instance record.
+
+    Three transforms, mutating `records` in place and returning it:
+      1. CONTAINERS (0x1015/0x1054/0x2519 name-parent/0x2624 count==1): re-express every
+         doubled track-element as separate single-offset elements, then sort the track
+         elements (all but the leading self-marker) by body rank of their target block.
+         The 0x2519 packed-offset table's single element is likewise offset-sorted by 0x251a
+         rank.
+      2. INSTANCE records (0x2519 lane / 0x2624 playlist): split the source's doubled record
+         into two single-offset records — the original keeps the non-copy child_refs+element,
+         the copy keeps the copy child_refs+element (child_ref[0] is the shared container ref,
+         kept by both) — placed in body-rank order of their element's target block.
+      3. ORDINALS: renumber lane and playlist instances 1..N+1 in body-rank order, and set
+         every fixed-count 0x251b/0x2716 record's ordinal to the new track count."""
+    def rank(content_type: int, offset: int) -> int:
+        return block_ranks.get(content_type, {}).get(offset, 1 << 30)
+
+    for record in records:
+        child_type = _container_child_type(record)
+        if child_type is not None:
+            head = record.elements[0]
+            rest = [Element(rel=0, tag1=4, offsets=[o])
+                    for element in record.elements[1:] for o in element.offsets]
+            rest.sort(key=lambda e: rank(child_type, e.offsets[0]))
+            record.elements = [head] + rest
+        elif record.content_type == 0x2519 and record.count == 2 and record.flag == 0:
+            record.elements[0].offsets = sorted(record.elements[0].offsets,
+                                                 key=lambda o: rank(0x251A, o))
+
+    out: list[IndexRecord] = []
+    for record in records:
+        is_lane = _is_lane_instance_record(record)
+        is_playlist = _is_playlist_instance_record(record)
+        doubled = ((is_lane or is_playlist)
+                   and len(record.elements) == 1 and len(record.elements[0].offsets) == 2)
+        if not doubled:
+            out.append(record)
+            continue
+        # child_ref[0] is the shared container ref (kept by both halves); the remaining
+        # child_refs come in original/copy pairs — partition by copy-membership.
+        head_cr = record.child_refs[0]
+        orig_crs = [head_cr]
+        copy_crs = [copy.deepcopy(head_cr)]
+        for child in record.child_refs[1:]:
+            (copy_crs if child.offset in copy_offsets else orig_crs).append(child)
+        off_a, off_b = record.elements[0].offsets
+        copy_off = off_a if off_a in copy_offsets else off_b
+        orig_off = off_b if copy_off == off_a else off_a
+        r_orig = copy.deepcopy(record)
+        r_orig.child_refs, r_orig.elements = orig_crs, [Element(rel=0, tag1=4, offsets=[orig_off])]
+        r_copy = copy.deepcopy(record)
+        r_copy.child_refs, r_copy.elements = copy_crs, [Element(rel=0, tag1=4, offsets=[copy_off])]
+        child_type = 0x251A if is_lane else 0x261C
+        out.extend(sorted((r_orig, r_copy), key=lambda r: rank(child_type, r.elements[0].offsets[0])))
+    records = out
+
+    def _elem_rank(record: IndexRecord, content_type: int) -> int:
+        return rank(content_type, record.elements[0].offsets[0]) if record.elements else 1 << 30
+
+    lanes = [r for r in records if _is_lane_instance_record(r)]
+    for i, record in enumerate(sorted(lanes, key=lambda r: _elem_rank(r, 0x251A)), 1):
+        record.ordinal = i
+    playlists = [r for r in records if _is_playlist_instance_record(r)]
+    for i, record in enumerate(sorted(playlists, key=lambda r: _elem_rank(r, 0x261C)), 1):
+        record.ordinal = i
+    new_track_count = len(lanes)
+    for record in records:
+        if (record.content_type == 0x2519 and record.child_refs
+                and record.child_refs[0].child_type in (0x251B, 0x2716)):
+            record.ordinal = new_track_count
+    return records
 
 
 # --- record synthesis (Pass 2, step 1: emit the per-track records) -----------

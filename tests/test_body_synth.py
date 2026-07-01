@@ -994,11 +994,70 @@ class ContainerCountValidatorTests(unittest.TestCase):
         n = ["Kick", "Snare", "Bass", "Gtr", "Keys", "Vox", "Perc", "FX"]
         base9 = BS.set_track_names(BS.synthesize_stereo_inline(9), n + ["Aux"])
         synth8 = BS.set_track_names(BS.synthesize_stereo_inline(8), n)
-        A, B = bt(BS.remove_track(base9, "Aux")), bt(synth8)
+        removed = BS.remove_track(base9, "Aux")
+        A, B = bt(removed), bt(synth8)
         diffs = [(c, i) for c in set(A) | set(B)
                  for i in range(min(len(A.get(c, [])), len(B.get(c, []))))
                  if c < 0x4b00 and A[c][i] != B[c][i]]
         self.assertEqual(diffs, [])
+        # WHOLE FILE (the 0x0002 master index included): the size-walk above EXCLUDES the
+        # trailing index, so assert full byte-identity mod GUID here. Guards the index
+        # rank-rebuild (drop dead per-track records + re-rank the track-count ordinal +
+        # derive the packed-table tag1) that `remove_track` must do beyond offset-shifting.
+        self.assertEqual(norm(removed), norm(synth8))
+
+    @staticmethod
+    def _norm_guid(b):
+        b = bytearray(b); k = 0
+        while True:
+            k = b.find(b"\x2a\x00\x00\x00", k)
+            if k < 0:
+                break
+            if k + 12 <= len(b):
+                b[k + 4 : k + 12] = b"\x00" * 8
+            k += 1
+        return bytes(b)
+
+    def test_remove_middle_track_index_matches_valid(self):
+        """MIDDLE-track removal: the rebuilt 0x0002 master index is byte-identical (mod GUID)
+        to synth(N)'s index. The BODY block order differs from a fresh synth (removing a
+        middle track leaves survivors in a different physical arrangement), so only the index
+        can be asserted equal -- but it MUST be exact, guarding the per-track ordinal re-rank
+        (`rebuild_after_track_drop` decrements every lane/playlist instance ordinal above the
+        removed position; a last-track removal never exercises this)."""
+        norm = self._norm_guid
+        names = ["Kick", "Snare", "Bass", "Gtr", "Keys", "Vox", "Perc", "FX",
+                 "Aux", "Bus", "Subz", "Mon", "Cue", "Ref", "Alt", "Sum", "Mixx", "Dir", "Sndz", "Rtn"]
+        for rmpos in (1, 10, 15):
+            full = names[:rmpos] + ["Zed"] + names[rmpos:]
+            base = BS.set_track_names(BS.synthesize_stereo_inline(21), full)
+            synth = BS.set_track_names(BS.synthesize_stereo_inline(20), names)
+            removed = BS.remove_track(base, "Zed")
+            rr = FI.final_index_ref(removed)
+            rs = FI.final_index_ref(synth)
+            self.assertEqual(norm(removed)[rr.start:], norm(synth)[rs.start:],
+                             msg=f"index differs for middle removal at pos {rmpos + 1}")
+
+    def test_duplicate_index_is_byte_identical_to_valid(self):
+        """`duplicate_track` rebuilds a CANONICAL master index -- the trailing 0x0002 block is
+        byte-identical (mod GUID) to a fresh synth(N+1) of the same track layout. Guards
+        `final_index.canonicalize_after_track_add` (split the doubled per-track
+        elements/instance records into synth's separate body-rank-ordered ones + re-rank the
+        ordinals). Only the INDEX is asserted equal: the copy is inserted after the source, so
+        the BODY block order differs from a fresh synth (same positional fact as a middle
+        removal). The round-trip back to the original is byte-exact."""
+        norm = self._norm_guid
+        for src in ("Gtr", "Vox"):     # 3-char names, so 'Zed' matches the length constraint
+            b8 = self._base()
+            dup = BS.duplicate_track(b8, src, "Zed")
+            synth9 = BS.set_track_names(BS.synthesize_stereo_inline(9),
+                                        [t.name for t in BS.track_types(dup)])
+            rd = FI.final_index_ref(dup)
+            rs = FI.final_index_ref(synth9)
+            self.assertEqual(norm(dup)[rd.start:], norm(synth9)[rs.start:],
+                             msg=f"duplicate index of {src!r} != synth(9) index")
+            # and the round-trip back to the original is byte-exact
+            self.assertEqual(BS.remove_track(dup, "Zed"), b8)
 
     def test_track_edits_match_valid_structure(self):
         """A duplicate's per-track block delta equals a real N+1-track session's (real block
