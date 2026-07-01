@@ -129,3 +129,18 @@ the 6 indexed types (remove a child_ref = splice 11 B + decrement the record cou
 element offset = splice 4 B + decrement k; then offset-shift). Validate: reproduce bak.045's
 structure (track gone, other tracks byte-intact) + holes resolve + rc=0. Start with the
 empty-track case (no clips/lanes-with-clips), then generalize to tracks with clips.
+
+## Track edits — EOS bug FIXED, PT re-confirmation pending (2026-07-01)
+
+PT verification (empty-track sessions): **verify_1 (replace_tempo_map/replace_meter_map) = PT
+VALID** ✓. **remove_track + duplicate_track = "end of stream encountered"** (PT-rejected
+despite rc=0). ROOT CAUSE: a *count-prefixed container* stores a `u32` child-count at
+payload+0 and PT reads exactly that many children; the track edits changed the containers'
+children but not the count → PT reads past the container → EOS. Our size-driven reader
+tolerates the stale count (rc=0 ≠ PT-valid). FIXED: `_fix_container_counts` (called by both
+track edits) rewrites the counts of `0x1015`(→`0x1014`), `0x1054`(→`0x1052`), `0x2624`(→total
+per-track subtrees); idempotent on all 26 corpus + round-trip preserved. NEW TOOL:
+`body_synth.validate(data)` = pre-write EOS gate replicating PT's container read (spec §14.6).
+NEXT: user to re-test the regenerated verify_2/verify_3 in PT; if still failing, hunt the next
+count-container / structural invariant (validate() is extensible — add the container type +
+its tallied child type). Broaden validate() beyond the 3 track containers as more are confirmed.

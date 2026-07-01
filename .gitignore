@@ -10,3 +10,7 @@ generated/
 
 # Donor pack build artifact (regenerate with: python -m ptxformatwriter.donorpack)
 *.pack
+
+# Local-only working directories (analysis scratch) — never versioned.
+__/
+__disassemblies/

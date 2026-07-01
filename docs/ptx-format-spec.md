@@ -660,6 +660,19 @@ draws); `ft1`/`ft2` are the source mtime FILETIME, `filesize` the referenced WAV
 5. **GUIDs/nonces are free** — any deterministic value works; PT doesn't validate them
    across sessions. Identity that *does* matter: WAV UMIDs, the region `findex`, descriptor
    mtimes (for the wave cache), and every index offset.
+6. **Keep container child-counts in sync.** Pro Tools reads the body as a nested stream: a
+   *count-prefixed container* stores a `u32` child-count at payload+0, then reads exactly
+   that many child blocks (some containers then read a trailer block of a *different* type).
+   If the stored count doesn't match the actual children, PT reads past the container and
+   fails with **"end of stream encountered."** A size-driven reader walks by declared size
+   and *tolerates* a stale count, so an edit can pass `rc=0` yet be PT-invalid — this is the
+   subtlest way a track add/remove breaks. Confirmed count-containers include `0x1015`
+   (tallies `0x1014` track entries), `0x1054` (tallies `0x1052` lanes), and `0x2624` (tallies
+   ALL per-track subtrees — `0x261c`/`0x261e`/`0x2621`/… — i.e. the total track count; the
+   real `Hipsters bak.044→045` removal drops it 142→141). Any block-add/remove edit must
+   rewrite the affected counts. `body_synth.validate(data)` replicates this walk and reports
+   mismatches **before** writing (sound on all 26 corpus sessions); use it as a pre-write gate
+   in addition to Pro Tools itself.
 
 ---
 

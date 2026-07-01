@@ -953,5 +953,32 @@ class MixedMidiTests(unittest.TestCase):
                 self.assertEqual(midi, list(range(1, len(midi) + 1)), msg="MIDI 1..M no gaps")
 
 
+class ContainerCountValidatorTests(unittest.TestCase):
+    """`body_synth.validate` replicates Pro Tools' container read to catch a stale child
+    count (the 'end of stream' class of failure). remove_track/duplicate_track now rewrite
+    those counts, so their output must validate clean."""
+
+    def _base(self):
+        d = BS.synthesize_stereo_inline(8)
+        return BS.set_track_names(d, ["Kick", "Snare", "Bass", "Gtr", "Keys", "Vox", "Perc", "FX"])
+
+    def test_valid_session_is_clean(self):
+        self.assertEqual(BS.validate(self._base()), [])
+
+    def test_track_edits_validate_clean(self):
+        b = self._base()
+        self.assertEqual(BS.validate(BS.remove_track(b, "Gtr")), [])
+        self.assertEqual(BS.validate(BS.duplicate_track(b, "Bass", "Bas2")), [])
+
+    def test_catches_corrupted_container_count(self):
+        b = bytearray(self._base())
+        for z, _e, c in BS._size_driven_blocks(bytes(b)):
+            if c == 0x2624:                                  # bump the total-track count high
+                cur = int.from_bytes(b[z + 9 : z + 13], "little")
+                b[z + 9 : z + 13] = (cur + 1).to_bytes(4, "little")
+                break
+        self.assertTrue(any(p["content_type"] == 0x2624 for p in BS.validate(bytes(b))))
+
+
 if __name__ == "__main__":
     unittest.main()

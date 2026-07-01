@@ -4132,6 +4132,77 @@ def clips(data: bytes) -> "list[dict]":
     return out
 
 
+# --- container child-count invariant (a Pro Tools deserializer requirement) --
+#
+# Pro Tools reads the body as a nested stream: a "count-prefixed container" holds a
+# u32 child-count at payload+0, then that many child blocks (some containers append
+# a trailer block of a DIFFERENT type). If the stored count does not match the actual
+# children, PT's per-object read walks off the end -> "Could not complete your request
+# because end of stream encountered." Our size-driven reader tolerates a stale count
+# (it walks by declared size), so an edit can pass rc=0 yet be PT-INVALID. Adding or
+# removing a track changes these containers' children but not their declared count,
+# so the count must be rewritten. Maps are corpus-derived (count == actual on every
+# valid session): most tally leading children of ONE type; 0x2624 tallies ALL its
+# (heterogeneous) per-track subtrees.
+_COUNT_CONTAINER_CHILD = {0x1015: 0x1014, 0x1054: 0x1052}
+_COUNT_CONTAINER_TOTAL = frozenset({0x2624})
+
+
+def _container_actual_count(data: bytes, z: int, e: int, c: int) -> int:
+    """The child count a count-prefixed container SHOULD carry: every direct child for
+    a `_TOTAL` container, else the leading children of its tallied type."""
+    p = z + 13
+    if c in _COUNT_CONTAINER_TOTAL:
+        n = 0
+        while p < e and data[p] == 0x5A:
+            sz = int.from_bytes(data[p + 3 : p + 7], "little")
+            if p + 7 + sz > e:
+                break
+            p += 7 + sz
+            n += 1
+        return n
+    child = _COUNT_CONTAINER_CHILD[c]
+    n = 0
+    while p < e and data[p] == 0x5A and int.from_bytes(data[p + 7 : p + 9], "little") == child:
+        p += 7 + int.from_bytes(data[p + 3 : p + 7], "little")
+        n += 1
+    return n
+
+
+def _fix_container_counts(data: bytes) -> bytes:
+    """Rewrite the child-count `u32` at payload+0 of every count-prefixed container to
+    match its actual children. Size-neutral (no reindex needed). Called at the end of a
+    track add/remove. Idempotent (byte-identical) on any already-consistent session."""
+    out = bytearray(data)
+    for z, e, c in _size_driven_blocks(data):
+        if c in _COUNT_CONTAINER_CHILD or c in _COUNT_CONTAINER_TOTAL:
+            out[z + 9 : z + 13] = _container_actual_count(data, z, e, c).to_bytes(4, "little")
+    return bytes(out)
+
+
+def validate(data: bytes) -> "list[dict]":
+    """Catch a class of Pro Tools "end of stream" failures BEFORE writing, by replicating
+    PT's container read: report every count-prefixed container whose stored child count
+    does not match its actual children (which makes PT read past the container's bytes).
+    Returns a list of `{content_type, zmark, stored_count, actual_children}` ([] == clean).
+
+    `rc == 0` from the reader does NOT imply this passes — the reader walks by declared
+    size and tolerates a stale count; Pro Tools does not. Sound on every corpus session
+    (no false positives) and flags remove_track/duplicate_track outputs that skipped the
+    count update. This checks the count-container invariant only: a clean result is
+    necessary, not proven-sufficient, for PT validity."""
+    out: "list[dict]" = []
+    for z, e, c in _size_driven_blocks(data):
+        if (c in _COUNT_CONTAINER_CHILD or c in _COUNT_CONTAINER_TOTAL) and z + 13 <= e \
+                and data[z + 13] == 0x5A:
+            stored = int.from_bytes(data[z + 9 : z + 13], "little")
+            actual = _container_actual_count(data, z, e, c)
+            if stored != actual:
+                out.append({"content_type": c, "zmark": z,
+                            "stored_count": stored, "actual_children": actual})
+    return out
+
+
 def remove_track(data: bytes, track_name: str) -> bytes:
     """Remove an AUDIO track (with all its clips) from an arbitrary session, leaving every
     other track/clip/plugin/automation intact.
@@ -4254,7 +4325,8 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                 el.offsets = offs
                 new_elems.append(el)
         r.elements = new_elems
-    return _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+    return _fix_container_counts(
+        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs)))
 
 
 def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
@@ -4397,7 +4469,8 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                 if o in ident:
                     no.append((copy_off(o), True))
             el.offsets = [o if is_copy else shift(o) for o, is_copy in no]
-    return _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+    return _fix_container_counts(
+        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs)))
 
 
 # --- arbitrary track naming --------------------------------------------------
