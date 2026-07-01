@@ -969,6 +969,23 @@ class ContainerCountValidatorTests(unittest.TestCase):
         b = self._base()
         self.assertEqual(BS.validate(BS.remove_track(b, "Gtr")), [])
         self.assertEqual(BS.validate(BS.duplicate_track(b, "Bass", "Bas2")), [])
+        # the FULL per-track block-set round-trips: duplicate then remove is byte-identical
+        self.assertEqual(BS.remove_track(BS.duplicate_track(b, "Bass", "Bas2"), "Bas2"), b)
+
+    def test_track_edits_match_valid_structure(self):
+        """A duplicate's per-track block delta equals a real N+1-track session's (real block
+        types only; the size-walk's phantom 0x4b48/0x5xxx artifacts are ignored)."""
+        from collections import Counter
+        real = lambda d: Counter(c for _z, _e, c in BS._size_driven_blocks(d)
+                                 if c in {0x1014, 0x1052, 0x261b, 0x261c, 0x2589, 0x210b,
+                                          0x2037, 0x2038, 0x203b, 0x2580, 0x251a, 0x2627})
+        b8 = self._base()
+        b9 = BS.set_track_names(BS.synthesize_stereo_inline(9),
+                                [t.name for t in BS.track_types(b8)] + ["Bas2"])
+        add = {t: real(b9)[t] - real(b8)[t] for t in set(real(b9)) | set(real(b8))}
+        dup = BS.duplicate_track(b8, "Bass", "Bas2")
+        got = {t: real(dup)[t] - real(b8)[t] for t in set(real(dup)) | set(real(b8))}
+        self.assertEqual(got, add)
 
     def test_catches_corrupted_container_count(self):
         b = bytearray(self._base())

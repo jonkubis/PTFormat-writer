@@ -170,6 +170,29 @@ def _name_table_entries(table: bytes) -> list[bytes]:
     return entries
 
 
+def _name_entry_span(data: bytes, name_off: int, bl) -> "tuple[int, int] | None":
+    """The exact byte-span `[start, end)` of the `0x2519` inline name entry whose name
+    begins at `name_off`. A normal entry is `<len:u32><name><23-byte trailer>`, but the
+    LAST entry in the table carries a SHORT (21-byte) trailer -- it is bounded by the end
+    of the inline-entry region (the first framed child of the `0x2519` block). Using the
+    fixed 23-byte suffix on the last entry over-splices 2 bytes and misframes the table ->
+    Pro Tools "end of stream". Returns None if `name_off` is not inside a `0x2519` block.
+    `bl` is the size-driven block list."""
+    host = None
+    for z, e, c in bl:
+        if c == 0x2519 and z < name_off < e and (host is None or z > host[0]):
+            host = (z, e, c)
+    if host is None:
+        return None
+    z, e, _c = host
+    children = [zz for zz, _ee, _cc in bl if z < zz < e]
+    region_end = min(children) if children else e
+    start = name_off - 4
+    nlen = int.from_bytes(data[start : start + 4], "little")
+    full_end = start + 4 + nlen + _NAME_ENTRY_SUFFIX
+    return (start, min(full_end, region_end))   # clamp: the final entry's trailer is short
+
+
 def _name_table_region(data: bytes, ptf: PTFFormat) -> tuple[int, int]:
     """(content_start, first_child_zmark) of the single 0x2519 block's own-byte
     name table."""
@@ -4146,11 +4169,36 @@ def clips(data: bytes) -> "list[dict]":
 # (heterogeneous) per-track subtrees.
 _COUNT_CONTAINER_CHILD = {0x1015: 0x1014, 0x1054: 0x1052}
 _COUNT_CONTAINER_TOTAL = frozenset({0x2624})
+# Two per-track containers whose child-count `u32` is NOT at payload+0: `0x2107` (child
+# `0x210b`) keeps it at payload+9 (z+18); `0x258a` (child `0x2589`) keeps it immediately
+# BEFORE the first `0x2589` child (a preamble child precedes the count). `0x258a` appears
+# more than once per session; only the instance that actually holds `0x2589` children
+# carries the count, so `_count_field_pos` returns None for the empty ones.
+_COUNT_CONTAINER_OFFSET = {0x2107: 0x210B, 0x258A: 0x2589}
 
 
-def _container_actual_count(data: bytes, z: int, e: int, c: int) -> int:
-    """The child count a count-prefixed container SHOULD carry: every direct child for
-    a `_TOTAL` container, else the leading children of its tallied type."""
+def _direct_children_of_type(data: bytes, z: int, e: int, child: int, bl) -> "list[int]":
+    """Direct (immediate) children of container `[z, e)` whose content_type == `child`, as
+    sorted zmarks (a block nested deeper inside another child is not counted)."""
+    kids = [(a, b, c) for a, b, c in bl if z < a < e]
+    out = []
+    for a, b, c in kids:
+        if c != child:
+            continue
+        if any(a2 < a and b2 >= b for a2, b2, _c2 in kids if (a2, b2) != (a, b)):
+            continue
+        out.append(a)
+    return sorted(out)
+
+
+def _container_actual_count(data: bytes, z: int, e: int, c: int, bl=None) -> int:
+    """The child count a count-prefixed container SHOULD carry: for the off-payload
+    containers, the number of direct children of its type; for a `_TOTAL` container every
+    direct child; else the leading children of its tallied type."""
+    if c in _COUNT_CONTAINER_OFFSET:
+        if bl is None:
+            bl = _size_driven_blocks(data)
+        return len(_direct_children_of_type(data, z, e, _COUNT_CONTAINER_OFFSET[c], bl))
     p = z + 13
     if c in _COUNT_CONTAINER_TOTAL:
         n = 0
@@ -4169,13 +4217,29 @@ def _container_actual_count(data: bytes, z: int, e: int, c: int) -> int:
     return n
 
 
+def _count_field_pos(data: bytes, z: int, e: int, c: int, bl) -> "int | None":
+    """Absolute position of the count `u32` for an off-payload container (`0x2107` at
+    payload+9; `0x258a` just before its first `0x2589` child), or None if this instance
+    carries no such children."""
+    if _COUNT_CONTAINER_OFFSET[c] == 0x210B:
+        return z + 18
+    firsts = _direct_children_of_type(data, z, e, 0x2589, bl)
+    return firsts[0] - 4 if firsts else None
+
+
 def _fix_container_counts(data: bytes) -> bytes:
-    """Rewrite the child-count `u32` at payload+0 of every count-prefixed container to
-    match its actual children. Size-neutral (no reindex needed). Called at the end of a
-    track add/remove. Idempotent (byte-identical) on any already-consistent session."""
+    """Rewrite every count-prefixed container's child-count `u32` to match its actual
+    children -- both the payload+0 containers (`0x1015`/`0x1054`/`0x2624`) and the two
+    off-payload ones (`0x2107` payload+9, `0x258a` before-first-`0x2589`). Size-neutral (no
+    reindex needed). Called at the end of a track add/remove. Idempotent."""
+    bl = _size_driven_blocks(data)
     out = bytearray(data)
-    for z, e, c in _size_driven_blocks(data):
-        if c in _COUNT_CONTAINER_CHILD or c in _COUNT_CONTAINER_TOTAL:
+    for z, e, c in bl:
+        if c in _COUNT_CONTAINER_OFFSET:
+            pos = _count_field_pos(data, z, e, c, bl)
+            if pos is not None:
+                out[pos : pos + 4] = _container_actual_count(data, z, e, c, bl).to_bytes(4, "little")
+        elif c in _COUNT_CONTAINER_CHILD or c in _COUNT_CONTAINER_TOTAL:
             out[z + 9 : z + 13] = _container_actual_count(data, z, e, c).to_bytes(4, "little")
     return bytes(out)
 
@@ -4239,16 +4303,17 @@ def remove_track(data: bytes, track_name: str) -> bytes:
     """Remove an AUDIO track (with all its clips) from an arbitrary session, leaving every
     other track/clip/plugin/automation intact.
 
-    Unlike clip edits, a track's blocks are *indexed*, so this splices out the track's
-    whole block-set — its track-list entries (0x1014/0x251A), its lane(s) (0x1052, with
-    their placements) in the shared 0x1054 container, its 0x261C playlist subtree (0x261B
-    detail, view chain, per-track plugin/routing state), and its name-table string(s) — and
-    rebuilds the master index by dropping the child-refs/element-offsets that pointed at the
-    removed blocks and offset-shifting the survivors (the index round-trips parse->serialize
-    byte-exactly, so this is exact). The track's source regions/audio files linger in the
-    clips bin (harmless; matches clip removal). Currently handles AUDIO tracks (raises for
-    MIDI/aux/bus/master, whose subtree differs) and unique names. rc=0 + index-resolves +
-    other-tracks-byte-intact are corpus-validated; PT display confirmation pending."""
+    Splices out the track's COMPLETE per-track block-set: its track-list entries
+    (0x1014/0x251A), lane(s) (0x1052, with their placements) in the shared 0x1054, its 0x261C
+    playlist subtree (0x261B detail + first view-chain + plugin/routing), its SECOND
+    view-chain subtree (0x2589, attributed positionally, in the 0x258A container), its 0x210B
+    block (in 0x2107), and its inline 0x2519 name entry — then rebuilds the master index
+    (dropping the removed refs + offset-shifting survivors) and re-syncs every container
+    child-count (including the 0x258A/0x2107 counts and the name-table entry count). Handles
+    AUDIO tracks (raises for MIDI/aux/bus/master) and unique names. The track's source
+    regions/audio linger in the clips bin (harmless). Validated so the per-track block delta
+    equals a real session's, the EOS simulator (`validate`) is clean, rc=0, and every other
+    block is byte-identical."""
     nb = track_name.encode()
     ref = _FI.final_index_ref(data)
     bl = sorted(_raw_block_bounds(data, ref.start))
@@ -4290,25 +4355,40 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                     seed_guids.update(guids_in(data[z:e]))
                 elif c == 0x1052:                       # a lane (with its placements)
                     ident.add(z)
-                elif c == 0x2519:                       # a whole inline name entry in the name table
-                    # entry = <len:u32><name><23-byte trailer> (0x2A marker inside);
-                    # removing only <len><name> leaves the trailer -> misframes the next
-                    # entry -> Pro Tools "end of stream". Splice the ENTIRE entry.
-                    nt_ranges.append((j - 4, j + len(nb) + _NAME_ENTRY_SUFFIX))
+                elif c == 0x210B:                       # per-track 0x210B (name + playlist GUID)
+                    ident.add(z)
+                    seed_guids.update(guids_in(data[z:e]))
+                elif c == 0x2519:                       # a whole inline name entry
+                    span = _name_entry_span(data, j, bl)  # handles the short-trailer LAST entry
+                    if span:
+                        nt_ranges.append(span)
         pos = j + 1
     # link name -> track-list GUID -> the 0x102D that carries it -> its enclosing 0x261C subtree
-    # (robust even when the track name isn't stored inside the detail subtree)
+    pl_ranges: "list[tuple[int, int]]" = []
     for z, e, c in bl:
         if c == 0x102D and any(g in data[z:e] for g in seed_guids):
             cs = [(cz, ce) for cz, ce, cc in bl if cc == 0x261C and cz < z < ce]
             if cs:
                 pz, pe = max(cs)
+                pl_ranges.append((pz, pe))
                 ident |= {zz for zz, _ee, _cc in bl if pz <= zz < pe}
     if not any(zct[z] == 0x261B for z in ident):
         raise ValueError(
             f"cannot locate track {track_name!r} (not found, or a non-audio track type)")
 
-    # outermost removed blocks (a subtree parent covers its children) + the name-table strings
+    # the track's SECOND view-chain subtree (0x2589) is attributed POSITIONALLY: the i-th
+    # 0x2589 belongs to the i-th playlist (0x261C/0x261E/0x2620) in zmark order. Present only
+    # where the 0x2589 count == playlist count (a no-op guard on older schemas).
+    playlists = sorted(z for z, _e, c in bl if c in (0x261C, 0x261E, 0x2620))
+    s2589 = sorted(z for z, _e, c in bl if c == 0x2589)
+    if s2589 and pl_ranges and len(s2589) == len(playlists):
+        pz = min(p for p, _pe in pl_ranges)
+        if pz in playlists:
+            rank = playlists.index(pz)
+            if 0 <= rank < len(s2589):
+                ident.add(s2589[rank])
+
+    # outermost removed blocks (a subtree parent covers its children) + the name-table entries
     ranges = [(z, zend[z]) for z in ident
               if not any(zz < z and zend[zz] >= zend[z] for zz in ident if zz != z)]
     ranges = sorted(ranges + nt_ranges)
@@ -4369,17 +4449,18 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
     `remove_track`, validated by round-trip byte-identity (`duplicate_track` then
     `remove_track(new_name)` == original).
 
-    Copies the source track's block-set (track-list entries 0x1014/0x251A, lane(s) 0x1052
-    in the shared 0x1054, and the 0x261C playlist subtree), substituting the track name and
-    giving each channel a fresh GUID; inserts each copy after its source; grows the
-    enclosing containers; and adds the new blocks' master-index references (offset-shifting
-    the rest via the same parse->modify->serialize rank-rebuild remove_track uses). The copy
-    shares the source's clips/regions (a true duplicate).
+    Copies the source track's COMPLETE per-track block-set (track-list entries 0x1014/0x251A,
+    lane(s) 0x1052 in the shared 0x1054, the 0x261C playlist subtree, the SECOND view-chain
+    subtree 0x2589, the 0x210B block, and the inline 0x2519 name entry), substituting the
+    track name and fresh per-channel GUIDs; inserts each copy after its source; grows the
+    enclosing containers and re-syncs their child-counts; and adds the new blocks' master-index
+    references. The copy shares the source's clips/regions (a true duplicate).
 
-    v1 constraints: `new_name` must be the SAME LENGTH as `source_track` (a different length
-    changes block sizes — a planned refinement); audio tracks only; unique source name.
-    rc=0 + index-resolves + round-trip byte-identity are corpus-validated; PT display
-    confirmation and exact PT track-order placement are pending."""
+    v1 constraints: `new_name` must be the SAME LENGTH as `source_track`; audio tracks only;
+    unique source name; cannot duplicate the last track in the name table (short-trailer entry
+    — rename/reorder first). Validated so the per-track block delta equals a real session's,
+    the EOS simulator (`validate`) is clean, rc=0, the round-trip (`duplicate_track` then
+    `remove_track(new_name)`) is byte-identical, and every other block is byte-intact."""
     if len(new_name) != len(source_track):
         raise ValueError("v1: new_name must be the same length as source_track")
     ref = _FI.final_index_ref(data)
@@ -4422,19 +4503,42 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                     seed.update(guids_in(data[z:e]))
                 elif c == 0x1052:
                     ident.add(z)
+                elif c == 0x210B:                       # per-track 0x210B (name + playlist GUID)
+                    ident.add(z)
+                    seed.update(guids_in(data[z:e]))
                 elif c == 0x2519:                       # copy the WHOLE inline name entry
-                    # <len:u32><name><23-byte trailer>; copying only <len><name> inserts a
-                    # trailer-less entry -> misframes the list -> "end of stream".
-                    nt_ranges.append((j - 4, j + len(sb) + _NAME_ENTRY_SUFFIX))
+                    span = _name_entry_span(data, j, bl)
+                    if span:
+                        st, en = span
+                        # the LAST name entry has a SHORT (21-byte) trailer; copying it would
+                        # leave the source needing a full trailer it lacks -> misframed table.
+                        if en - st < 4 + len(sb) + _NAME_ENTRY_SUFFIX:
+                            raise ValueError(
+                                "v1: cannot duplicate the last track in the name table "
+                                "(short-trailer entry); rename/reorder first")
+                        nt_ranges.append((st, en))
         pos = j + 1
+    pl_ranges: "list[tuple[int, int]]" = []
     for z, e, c in bl:
         if c == 0x102D and any(g in data[z:e] for g in seed):
             cs = [(cz, ce) for cz, ce, cc in bl if cc == 0x261C and cz < z < ce]
             if cs:
                 pz, pe = max(cs)
+                pl_ranges.append((pz, pe))
                 ident |= {zz for zz, _ee, _cc in bl if pz <= zz < pe}
     if not any(zct[z] == 0x261B for z in ident):
         raise ValueError(f"cannot locate audio track {source_track!r}")
+
+    # the source track's SECOND view-chain subtree (0x2589), positional (same attribution as
+    # remove_track); copied verbatim (no name/GUID inside) by the units machinery below.
+    playlists = sorted(z for z, _e, c in bl if c in (0x261C, 0x261E, 0x2620))
+    s2589 = sorted(z for z, _e, c in bl if c == 0x2589)
+    if s2589 and pl_ranges and len(s2589) == len(playlists):
+        pz = min(p for p, _pe in pl_ranges)
+        if pz in playlists:
+            rank = playlists.index(pz)
+            if 0 <= rank < len(s2589):
+                ident.add(s2589[rank])
 
     # fresh per-channel GUIDs (deterministic, guaranteed absent)
     gmap: "dict[bytes, bytes]" = {}
