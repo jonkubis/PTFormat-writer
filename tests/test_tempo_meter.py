@@ -325,5 +325,26 @@ class CompositionTests(unittest.TestCase):
             self.assertEqual(_reload_ok(out), 0)
 
 
+@unittest.skipUnless(_UNTITLED.exists() and _90.exists() and _121.exists()
+                     and _M34.exists() and _T140.exists() and _M34B2.exists(),
+                     "base-read controls not all present")
+class BaseReadTests(unittest.TestCase):
+    """`body_synth.base_tempo` / `base_meter` read the session's starting tempo / time
+    signature (event 0 of the map) from an ARBITRARY session via the size-driven block
+    walk. Validated against PT-authored controls -- including the BASE event of a
+    multi-event map (a 120->140 tempo reads 120; a 4/4->3/4 meter reads 4/4)."""
+
+    def test_base_tempo(self) -> None:
+        self.assertEqual(BS.base_tempo(_load_path(_UNTITLED)), 120.0)   # PT default
+        self.assertEqual(BS.base_tempo(_load_path(_90)), 90.0)
+        self.assertEqual(BS.base_tempo(_load_path(_121)), 121.0)
+        self.assertEqual(BS.base_tempo(_load_path(_T140)), 120.0)       # base of 120->140
+
+    def test_base_meter(self) -> None:
+        self.assertEqual(BS.base_meter(_load_path(_UNTITLED)), (4, 4))
+        self.assertEqual(BS.base_meter(_load_path(_M34)), (3, 4))
+        self.assertEqual(BS.base_meter(_load_path(_M34B2)), (4, 4))     # base of 4/4->3/4
+
+
 if __name__ == "__main__":
     unittest.main()

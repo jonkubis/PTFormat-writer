@@ -12,10 +12,19 @@ the renumbered `THE WIND` corpus session reads `-2`. The bar-1 tick origin `0xE8
 is unchanged by renumbering (it's a relabel, not a tick shift). Shipped:
 `body_synth.session_start_bar()` (read). See spec §5c.
 
+**Reading event 0 is shipped:** `body_synth.base_tempo()` (session BPM, the first f64 in
+[20,300] inside the `0x2028` "Tempo" block) and `base_meter()` (event-0 numerator/denominator
+from the `0x2029` "Meter" block: count `u32`@payload+11, events@payload+15, start-bar
+`i32`@event+8, num@+12, den@+16). Both are surfaced in `session_info()` and validated on
+PT-authored controls (90/121/3-4/120→140/4-4→3-4) + all 26 corpus sessions. See spec §10.
+
 Still open (need Pro Tools ground truth):
-- **Writing** a renumbered start (and the multi-event case): meter event records are
-  variable-length — only event 0 is mapped. Author a multi-segment meter map with a
-  renumbered start, save, and delineate the per-event record length before writing.
+- **Reading a FULL multi-event map** (tempo or meter) on arbitrary sessions: events past
+  event 0 are variable-length — only event 0 is mapped. Delineate the per-event record
+  length so `tempo_map()` / `meter_map()` can return every event.
+- **Writing** a renumbered start (and the multi-event case): same variable-length record
+  blocker. Author a multi-segment meter map with a renumbered start, save, and delineate
+  the per-event record length before writing.
 - **Empty meter map** (`count==0`, e.g. COGNAC/MANOLITO): the i32 field only exists when
   there's ≥1 meter event. Renumber such a session in PT and find where the value lands
   (a forced `count=1` event, or a session-setup block like `0x2305`/`0x230A`?).

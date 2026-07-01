@@ -3498,6 +3498,49 @@ def session_bit_depth(data: bytes) -> int:
     raise ValueError("no 0x1028 sample-rate block")
 
 
+def base_tempo(data: bytes) -> "float | None":
+    """The session's base (starting) tempo in BPM -- the first event of the tempo map.
+
+    The `0x2028` block opens with a "Tempo" tag, the event count as a `u32` at payload +11,
+    then per-event "Const"/"TMS" records. The event-0 BPM is the first plausible IEEE-754
+    `f64` in [20, 300] within the block. Returns None if the session has no tempo map.
+    Multi-event tempo maps expose only the base tempo here (the per-record stride past
+    event 0 is not yet mapped). PT-corpus-confirmed sensible across all 26 corpus sessions."""
+    import struct
+    for z, e, c in _size_driven_blocks(data):
+        if c != 0x2028 or data[z + 9 : z + 14] != b"Tempo":
+            continue
+        for off in range(z + 9, e - 8):
+            v = struct.unpack_from("<d", data, off)[0]
+            if 20.0 <= v <= 300.0:
+                return round(v, 4)
+        return None
+    return None
+
+
+def base_meter(data: bytes) -> "tuple[int, int]":
+    """The session's base (starting) time signature as `(numerator, denominator)`.
+
+    The `0x2029` "Meter" block holds the event count as a `u32` at payload +11 and events
+    at payload +15; event 0 carries the start bar (`i32` at +8), numerator (`u32` at +12)
+    and denominator (`u32` at +16). An empty meter map (count 0) or a session with no meter
+    block defaults to 4/4. Multi-event meter maps expose only the base meter here (later
+    events are variable-length and not yet mapped). PT-corpus-confirmed sensible across all
+    26 corpus sessions."""
+    for z, _e, c in _size_driven_blocks(data):
+        if c != 0x2029 or data[z + 9 : z + 14] != b"Meter":
+            continue
+        count = int.from_bytes(data[z + 20 : z + 24], "little")
+        if count < 1:
+            return (4, 4)
+        ev = z + 24
+        return (
+            int.from_bytes(data[ev + 12 : ev + 16], "little"),
+            int.from_bytes(data[ev + 16 : ev + 20], "little"),
+        )
+    return (4, 4)
+
+
 def _lane_track_name(data: bytes, lane_zmark: int, lane_end: int) -> str:
     """Track/lane name: the length-prefixed string in the lane head (`<u32 len><len
     bytes>`). Read the exact length -- a greedy printable scan would swallow the
@@ -3722,6 +3765,8 @@ def session_info(data: bytes) -> dict:
         "sample_rate": session_sample_rate(data),
         "bit_depth": session_bit_depth(data),
         "start_bar": session_start_bar(data),
+        "base_tempo": base_tempo(data),
+        "base_meter": base_meter(data),
         "n_blocks": len(bl),
         "n_tracks": ctc.get(0x261B, 0),          # one 0x261B per track of any type
         "n_clips": ctc.get(0x1050, 0),

@@ -471,31 +471,38 @@ fields, in the 6-char-name template layout: **channel** at `+78`, region **GUID*
 
 ### Tempo (`0x2028` map / `0x2718` lane) — **(PT-confirmed)**
 
-Block content = `u32 payload_len` + `u32 count` + `count × 61-byte records`, with
-`payload_len == 4 + count*61`. Each 61-byte record:
+On an **arbitrary** session the `0x2028` payload opens with the tag `"Tempo"` (payload +0),
+a `u16` version, a `u32` `payload_len` (+7), and the event `count` as a `u32` at **payload
++11**; the per-event records begin at **payload +15**. Each record is framed by the literal
+text `Const` … `TMS` and carries a 5-byte LE musical tick (subtract `ZERO_TICKS`) and the
+**BPM** as an IEEE-754 little-endian `double` (f64) (the synthesis path emits a fixed
+61-byte record with tick at record +30, bpm at ~+40–44, ppq at +48). Hundreds of tempo
+events are normal (one per beat-map point); the map is mirrored in the `0x2718` lane.
 
-| Record offset | Field |
+`body_synth.base_tempo(data)` returns the **event-0 (session base) BPM** — the first
+plausible f64 in `[20, 300]` within the block — validated against PT-authored controls
+(90 / 121 / 120→140 …) and all 26 corpus sessions. The per-record stride *past* event 0 on
+arbitrary sessions is not yet mapped (a full arbitrary tempo-map read is open — the earlier
+"fixed 61-byte, block-relative offsets" model was synthesis-derived and does not hold here).
+
+### Meter (`0x2029` map / `0x2719` lane) — **(PT-confirmed for event 0)**
+
+The `0x2029` payload opens with the tag `"Meter"` (payload +0), a `u16` version, a `u32`
+`payload_len` (+7), and the event `count` as a `u32` at **payload +11**; events begin at
+**payload +15**. **Event 0** (the session base meter + renumber start bar) is fixed:
+
+| Event-0 offset (from payload +15) | Field |
 |---|---|
-| (near start) | the literal text `Const` … `TMS` framing |
-| `+30` | musical position: 5-byte LE tick (subtract `ZERO_TICKS`) |
-| `+40` | **BPM** as IEEE-754 little-endian `double` (f64) |
-| `+48` | PPQ (`u32`) |
-
-Hundreds of tempo events are normal (one per beat-map point). The map is mirrored in the
-`0x2718` lane.
-
-### Meter (`0x2029` map / `0x2719` lane) — **(PT-confirmed)**
-
-Block content = `… u32 count …` + `count × 36-byte records`. Each 36-byte record:
-
-| Record offset | Field |
-|---|---|
-| `+0` | musical position: 5-byte LE tick (subtract `ZERO_TICKS`) |
-| `+8` | ordinal (`u32`) |
+| `+0` | musical position: `u64` tick (subtract `ZERO_TICKS`); `0` for the base |
+| `+8` | **start bar** (`i32`, signed — the renumber value, §5c) |
 | `+12` | numerator (`u32`) |
 | `+16` | denominator (`u32`) |
 
-Each meter event also has a 16-byte entry in the `0x2719` trailing lane list.
+`body_synth.base_meter(data)` returns `(numerator, denominator)` from event 0 (an empty map,
+`count == 0`, → 4/4), validated against PT-authored controls and the corpus. Events **past**
+event 0 are VARIABLE-length on real sessions (the fixed 36/52-byte record from the synthesis
+path does not hold), so a full arbitrary meter-map read is open. Each event also has an entry
+in the `0x2719` trailing lane list.
 
 ### Markers (`0x2030` list / `0x2077` record) — **(PT-confirmed)**
 
