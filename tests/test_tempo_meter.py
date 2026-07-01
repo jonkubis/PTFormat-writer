@@ -346,5 +346,40 @@ class BaseReadTests(unittest.TestCase):
         self.assertEqual(BS.base_meter(_load_path(_M34B2)), (4, 4))     # base of 4/4->3/4
 
 
+@unittest.skipUnless(_UNTITLED.exists() and _T140.exists() and _M34B2.exists(),
+                     "map-read controls not all present")
+class MapReadTests(unittest.TestCase):
+    """`body_synth.tempo_map` / `meter_map` read the FULL conductor maps from an arbitrary
+    session via the size-driven walk (the core reader's scan parser is unreliable on real
+    third-party sessions). Tempo records are fixed 61 B at zmark+28 (tick 5-byte @+30, BPM
+    f64 @+40); meter records fixed 36 B at zmark+24 (tick 5-byte @+0, num @+12, den @+16).
+    Validated by exact recovery of PT-authored multi-event controls + a writer round-trip."""
+
+    def test_tempo_map_control(self) -> None:
+        tm = BS.tempo_map(_load_path(_T140))
+        self.assertEqual([(round(b, 1), t) for b, t in tm], [(120.0, 0), (140.0, 3840000)])
+
+    def test_meter_map_control(self) -> None:
+        self.assertEqual(BS.meter_map(_load_path(_M34B2)), [(4, 4, 0), (3, 4, 3840000)])
+
+    def test_tempo_map_roundtrip_recovers_all_events(self) -> None:
+        # a resized 0x2028's declared size can lag its record count -> the reader must bound
+        # by `count`, not the block's declared end (regression guard for that).
+        unt, t140 = _load_path(_UNTITLED), _load_path(_T140)
+        out = BS.set_tempo_map(unt, [(100, 0), (150, 2 * _TQ), (75, 5 * _TQ)], t140, unt)
+        self.assertEqual([(round(b, 1), t) for b, t in BS.tempo_map(out)],
+                         [(100.0, 0), (150.0, 1920000), (75.0, 4800000)])
+
+    def test_meter_map_roundtrip_recovers_all_events(self) -> None:
+        unt, m = _load_path(_UNTITLED), _load_path(_M34B2)
+        out = BS.set_meter_map(unt, [(4, 4, 0), (3, 4, 4 * _TQ), (7, 8, 7 * _TQ)], m, unt)
+        self.assertEqual(BS.meter_map(out), [(4, 4, 0), (3, 4, 3840000), (7, 8, 6720000)])
+
+    def test_base_helpers_agree_with_full_maps(self) -> None:
+        t140, m2 = _load_path(_T140), _load_path(_M34B2)
+        self.assertEqual(BS.base_tempo(t140), round(BS.tempo_map(t140)[0][0], 4))
+        self.assertEqual(BS.base_meter(m2), BS.meter_map(m2)[0][:2])
+
+
 if __name__ == "__main__":
     unittest.main()

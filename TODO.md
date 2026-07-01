@@ -12,19 +12,25 @@ the renumbered `THE WIND` corpus session reads `-2`. The bar-1 tick origin `0xE8
 is unchanged by renumbering (it's a relabel, not a tick shift). Shipped:
 `body_synth.session_start_bar()` (read). See spec §5c.
 
-**Reading event 0 is shipped:** `body_synth.base_tempo()` (session BPM, the first f64 in
-[20,300] inside the `0x2028` "Tempo" block) and `base_meter()` (event-0 numerator/denominator
-from the `0x2029` "Meter" block: count `u32`@payload+11, events@payload+15, start-bar
-`i32`@event+8, num@+12, den@+16). Both are surfaced in `session_info()` and validated on
-PT-authored controls (90/121/3-4/120→140/4-4→3-4) + all 26 corpus sessions. See spec §10.
+**Reading the FULL maps is shipped:** `body_synth.tempo_map()` → `[(bpm, tick), …]` and
+`meter_map()` → `[(num, den, tick), …]` (plus `base_tempo()`/`base_meter()` for event 0, and
+`n_tempo_events`/`n_meter_events` in `session_info()`). Records are FIXED stride — tempo 61 B
+at `zmark+28` (tick 5-byte @+30, BPM f64 @+40, ppq @+48), meter 36 B at `zmark+24` (tick
+5-byte @+0, start-bar/ordinal @+8, num @+12, den @+16). The `0x2029` `payload_len == 12 +
+count*52` counts the 36-byte record + its 16-byte `0x2719` lane entry — that 52 was NOT a
+record stride (the earlier "variable-length" read). Both recover PT-authored controls exactly
+(120→140, 4/4→3/4 @bar2) and are sane/monotonic across the corpus (tempo to 111, meter to 18).
+See spec §10. NOTE (separate latent bug): `set_tempo_map` can leave a resized `0x2028`'s
+declared block size (`zmark+3`) lagging its record count — scan-parser-tolerated and
+PT-valid, but the readers bound by `count` not the declared end to compensate; worth fixing
+the size field for cleanliness.
 
 Still open (need Pro Tools ground truth):
-- **Reading a FULL multi-event map** (tempo or meter) on arbitrary sessions: events past
-  event 0 are variable-length — only event 0 is mapped. Delineate the per-event record
-  length so `tempo_map()` / `meter_map()` can return every event.
-- **Writing** a renumbered start (and the multi-event case): same variable-length record
-  blocker. Author a multi-segment meter map with a renumbered start, save, and delineate
-  the per-event record length before writing.
+- **Writing** a renumbered start bar: the read side is solved (event-0 `i32` start bar). Author
+  a renumbered session in PT and confirm what else moves before writing it (see §5c open item).
+- **Replacing** a map on an ARBITRARY (non-donor) session: `set_tempo_map`/`set_meter_map`
+  still expect top-level `0x2718`/`0x2719` (synthesis path) and fail on real sessions — port
+  them to the size-driven reindex now that the record layout is confirmed.
 - **Empty meter map** (`count==0`, e.g. COGNAC/MANOLITO): the i32 field only exists when
   there's ≥1 meter event. Renumber such a session in PT and find where the value lands
   (a forced `count=1` event, or a session-setup block like `0x2305`/`0x230A`?).

@@ -3504,18 +3504,10 @@ def base_tempo(data: bytes) -> "float | None":
     The `0x2028` block opens with a "Tempo" tag, the event count as a `u32` at payload +11,
     then per-event "Const"/"TMS" records. The event-0 BPM is the first plausible IEEE-754
     `f64` in [20, 300] within the block. Returns None if the session has no tempo map.
-    Multi-event tempo maps expose only the base tempo here (the per-record stride past
-    event 0 is not yet mapped). PT-corpus-confirmed sensible across all 26 corpus sessions."""
-    import struct
-    for z, e, c in _size_driven_blocks(data):
-        if c != 0x2028 or data[z + 9 : z + 14] != b"Tempo":
-            continue
-        for off in range(z + 9, e - 8):
-            v = struct.unpack_from("<d", data, off)[0]
-            if 20.0 <= v <= 300.0:
-                return round(v, 4)
-        return None
-    return None
+    Returns the first event of `tempo_map`. PT-corpus-confirmed sensible across all 26
+    corpus sessions."""
+    tm = tempo_map(data)
+    return round(tm[0][0], 4) if tm else None
 
 
 def base_meter(data: bytes) -> "tuple[int, int]":
@@ -3524,21 +3516,63 @@ def base_meter(data: bytes) -> "tuple[int, int]":
     The `0x2029` "Meter" block holds the event count as a `u32` at payload +11 and events
     at payload +15; event 0 carries the start bar (`i32` at +8), numerator (`u32` at +12)
     and denominator (`u32` at +16). An empty meter map (count 0) or a session with no meter
-    block defaults to 4/4. Multi-event meter maps expose only the base meter here (later
-    events are variable-length and not yet mapped). PT-corpus-confirmed sensible across all
-    26 corpus sessions."""
-    for z, _e, c in _size_driven_blocks(data):
+    block defaults to 4/4. Returns the `(numerator, denominator)` of the first event of
+    `meter_map`. PT-corpus-confirmed sensible across all 26 corpus sessions."""
+    mm = meter_map(data)
+    return (mm[0][0], mm[0][1]) if mm else (4, 4)
+
+
+def tempo_map(data: bytes) -> "list[tuple[float, int]]":
+    """The full tempo map as `[(bpm, tick), ...]` in conductor-tick order (the same shape
+    `set_tempo_map` consumes). Decoded from the `0x2028` "Tempo" block: `count` (`u32` at
+    payload +11) fixed 61-byte records starting at `zmark+28` (each `Const`/`TMS`-framed);
+    per record the musical position is a 5-byte LE tick at +30 (minus `ZERO_TICKS`) and the
+    BPM is an IEEE-754 `f64` at +40. Returns [] if the session has no tempo map. Recovers
+    PT-authored controls exactly (120->140 @bar2, 90, 121) and is sane/monotonic across the
+    corpus (up to 111 events)."""
+    import struct
+    for z, e, c in _size_driven_blocks(data):
+        if c != 0x2028 or data[z + 9 : z + 14] != b"Tempo":
+            continue
+        count = int.from_bytes(data[z + 20 : z + 24], "little")
+        out: "list[tuple[float, int]]" = []
+        for i in range(count):
+            p = z + 28 + 61 * i
+            if p + 61 > len(data):        # `count` is authoritative; bound only by the buffer
+                break                     # (a resized 0x2028's declared size can lag its records)
+            tick = int.from_bytes(data[p + 30 : p + 35], "little") - _ZERO_TICKS
+            out.append((struct.unpack_from("<d", data, p + 40)[0], tick))
+        return out
+    return []
+
+
+def meter_map(data: bytes) -> "list[tuple[int, int, int]]":
+    """The full meter map as `[(numerator, denominator, tick), ...]` in conductor-tick order
+    (the shape `set_meter_map` consumes). Decoded from the `0x2029` "Meter" block: `count`
+    (`u32` at payload +11) fixed 36-byte records starting at `zmark+24`; per record the
+    position is a 5-byte LE tick at +0 (minus `ZERO_TICKS`), the numerator a `u32` at +12,
+    the denominator a `u32` at +16 (a `u32` "ordinal"/start-bar sits at +8, see §5c). Note
+    the enclosing block's `payload_len` counts `12 + count*52` -- 36 for the record plus a
+    16-byte entry in the `0x2719` lane. Returns [] if the session has no meter map. Recovers
+    PT-authored controls exactly (4/4->3/4 @bar2) and is sane across the corpus (up to 18
+    events)."""
+    for z, e, c in _size_driven_blocks(data):
         if c != 0x2029 or data[z + 9 : z + 14] != b"Meter":
             continue
         count = int.from_bytes(data[z + 20 : z + 24], "little")
-        if count < 1:
-            return (4, 4)
-        ev = z + 24
-        return (
-            int.from_bytes(data[ev + 12 : ev + 16], "little"),
-            int.from_bytes(data[ev + 16 : ev + 20], "little"),
-        )
-    return (4, 4)
+        out: "list[tuple[int, int, int]]" = []
+        for i in range(count):
+            p = z + 24 + 36 * i
+            if p + 36 > len(data):        # `count` is authoritative; bound only by the buffer
+                break
+            tick = int.from_bytes(data[p : p + 5], "little") - _ZERO_TICKS
+            out.append((
+                int.from_bytes(data[p + 12 : p + 16], "little"),
+                int.from_bytes(data[p + 16 : p + 20], "little"),
+                tick,
+            ))
+        return out
+    return []
 
 
 def _lane_track_name(data: bytes, lane_zmark: int, lane_end: int) -> str:
@@ -3772,6 +3806,8 @@ def session_info(data: bytes) -> dict:
         "n_clips": ctc.get(0x1050, 0),
         "n_regions": ctc.get(0x2628, 0),
         "n_markers": ctc.get(0x2077, 0),
+        "n_tempo_events": len(tempo_map(data)),
+        "n_meter_events": len(meter_map(data)),
         "clip_lanes": [(name, k) for _z, name, k in clip_lanes(data)],
     }
 
