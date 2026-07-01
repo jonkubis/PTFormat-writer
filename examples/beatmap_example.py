@@ -126,13 +126,25 @@ def parse_beatmap_midi(path) -> Beatmap:
     return bm
 
 
-def convert_to_wav(mp3_path, out_wav, *, sample_rate: int = 44100, bits: int = 24) -> None:
-    """MP3 -> WAV at `sample_rate`/`bits`-bit/stereo via ffmpeg (overwrites)."""
+def convert_to_wav(mp3_path, out_wav, *, sample_rate: int = 44100, bits: int = 24,
+                   head_trim: int = 0) -> None:
+    """MP3 -> WAV at `sample_rate`/`bits`-bit/stereo via ffmpeg (overwrites).
+
+    `head_trim` drops that many leading samples AT THE MP3'S NATIVE RATE (before the
+    resample to `sample_rate`), so the WAV's sample 0 becomes the true audio content start.
+    This mirrors what the beatmapping app itself does to demixer-produced stems -- it decodes
+    the stem and discards `headTrimSamples` leading samples (the MP3 encode+decode round-trip
+    priming) before it detects beats, so its anchor times are relative to the *trimmed* audio.
+    A stem imported here without the same trim would sit that many samples late against the
+    grid. 0 for a normally-imported stem (no round-trip priming)."""
     codec = {16: "pcm_s16le", 24: "pcm_s24le", 32: "pcm_s32le"}[bits]
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3_path),
-         "-ar", str(sample_rate), "-ac", "2", "-c:a", codec, str(out_wav)],
-        check=True)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3_path)]
+    if head_trim > 0:
+        # atrim runs at the decoded (native) rate; the following -ar resamples the remainder,
+        # so head_trim is consumed in the SAME sample base the app measured it in.
+        cmd += ["-af", f"atrim=start_sample={int(head_trim)}"]
+    cmd += ["-ar", str(sample_rate), "-ac", "2", "-c:a", codec, str(out_wav)]
+    subprocess.run(cmd, check=True)
 
 
 def _stem_name(mp3_path) -> str:
@@ -142,14 +154,21 @@ def _stem_name(mp3_path) -> str:
 
 def build_session_from_beatmap(midi_path, mp3_paths, out_ptx, controls: Controls,
                                *, sample_rate: int = 44100, track_names=None,
-                               clip_names=None, click: bool = True) -> Beatmap:
+                               clip_names=None, click: bool = True,
+                               head_trims=None) -> Beatmap:
     """Build a self-contained Pro Tools session at `out_ptx` from a beatmap MIDI + MP3s.
 
     Converts each MP3 -> a 44.1k/24-bit/stereo WAV in `out_ptx`'s `Audio Files/` folder,
     builds N stereo tracks (named after `track_names` or the MP3 stems), writes the tempo
     map / meter map / markers from the MIDI, places each MP3's clip on its track at the
     head-sync, and (when `click` and `controls.click_ref` are set) adds a Click track as
-    the first/top track. Returns the parsed Beatmap. The .ptx + Audio Files (+ WaveCache.wfm)
+    the first/top track. Returns the parsed Beatmap.
+
+    `head_trims` (optional, parallel to `mp3_paths`) is the per-stem leading-sample trim in
+    each MP3's native sample base -- the beatmapping app's `headTrimSamples`, non-zero only
+    for its demixer-produced stems (MP3 round-trip priming). Each is dropped from the front
+    of that stem's decode so the clip's sample 0 is the true content start; without it a
+    demixer stem lands ~`headTrimSamples` samples late against the grid (see `convert_to_wav`). The .ptx + Audio Files (+ WaveCache.wfm)
     are self-contained at `out_ptx.parent`.
 
     Build order: tempo/meter/markers -> clips -> click -> track-names -> waveform-view.
@@ -175,7 +194,8 @@ def build_session_from_beatmap(midi_path, mp3_paths, out_ptx, controls: Controls
     tracks, wav_files = [], []
     for idx, mp3 in enumerate(mp3_paths):
         wav = audio_dir / (_stem_name(mp3) + ".wav")
-        convert_to_wav(mp3, wav, sample_rate=sample_rate)
+        trim = int(head_trims[idx]) if head_trims else 0     # per-stem MP3 round-trip priming
+        convert_to_wav(mp3, wav, sample_rate=sample_rate, head_trim=trim)
         # ffmpeg output is a raw WAV (no PT/BWF umid) -> wrap it (unique deterministic
         # UMID per stem) so build_audio_clips can link it.
         wrapped = B.wrap_raw_wav(wav.read_bytes(), controls.wav_template, seed=f"{_stem_name(mp3)}-{idx}")
