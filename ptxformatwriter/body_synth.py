@@ -3406,6 +3406,98 @@ def _index_offset_holes(data: bytes) -> "tuple[list[tuple[int, int]], set[int]]"
     return holes, zmarks
 
 
+def region_names(data: bytes) -> "list[tuple[int, str]]":
+    """Every audio REGION's name, as ``(region_zmark, name)`` in file order. An audio
+    region record (content_type 0x2628) frames as
+    ``5A | blocktype | size | 0x2628 | <u32 name-len @+9> | <name @+13> | geometry...``;
+    the length-prefixed name is the region's source/clip name (what shows in the clips
+    list and on placed clips, e.g. ``VERSE.dup3_67-09``, ``VPS kit 1.grp.L``). The
+    layout is present on 100% of region records across the corpus."""
+    out: "list[tuple[int, str]]" = []
+    for z, _e, c in _size_driven_blocks(data):
+        if c != 0x2628:
+            continue
+        n = int.from_bytes(data[z + 9 : z + 13], "little")
+        out.append((z, data[z + 13 : z + 13 + n].decode("latin1") if n else ""))
+    return out
+
+
+def _region_list_names(data: bytes,
+                       bl: "list[tuple[int, int, int]] | None" = None) -> "list[str]":
+    """Region names indexed by the **0x2629 region-instance list** in file order — the
+    index space a placement's +11 ref uses. `names[ref]` is the name of the 0x2628
+    record nested inside the ref-th 0x2629 (single forward pass)."""
+    if bl is None:
+        bl = _size_driven_blocks(data)
+    out: "list[str]" = []
+    cur = None  # (z, end, slot) of the open 0x2629
+    for z, e, c in bl:                                   # bl is sorted by zmark
+        if c == 0x2629:
+            out.append("")
+            cur = (z, e, len(out) - 1)
+        elif c == 0x2628 and cur and cur[0] < z < cur[1] and out[cur[2]] == "":
+            n = int.from_bytes(data[z + 9 : z + 13], "little")
+            out[cur[2]] = data[z + 13 : z + 13 + n].decode("latin1") if n else ""
+    return out
+
+
+def clip_names(data: bytes, lane_zmark: int) -> "list[str]":
+    """The region/source name of each clip in the lane at `lane_zmark`, in clip order
+    (parallel to `remove_clip`'s `clip_index`). Each placement's `0x104F` carries a u32
+    at +11 that is a 0-based index into the 0x2629 region list; this resolves it to the
+    region name. PT-corpus-confirmed (the bak.075->076 added clips resolve to the added
+    regions; a 'Wolf Wet' track's clips resolve to 'Wolf Wet.L')."""
+    bl = _size_driven_blocks(data)
+    rnames = _region_list_names(data, bl)
+    lane_end = next((e for z, e, c in bl if z == lane_zmark and c == 0x1052), None)
+    if lane_end is None:
+        raise ValueError(f"no 0x1052 lane at zmark {lane_zmark}")
+    placements = sorted(
+        (pz, pe) for pz, pe, c in bl if c == 0x1050 and lane_zmark < pz < lane_end
+    )
+    out: "list[str]" = []
+    for pz, pe in placements:
+        z104f = next((z for z, _e, c in bl if c == 0x104F and pz < z < pe), None)
+        ref = int.from_bytes(data[z104f + 11 : z104f + 15], "little") if z104f else -1
+        out.append(rnames[ref] if 0 <= ref < len(rnames) else "")
+    return out
+
+
+def session_start_bar(data: bytes) -> int:
+    """The session's starting bar NUMBER. Pro Tools can renumber a session to begin at
+    an arbitrary bar (e.g. -2, 0, 2) instead of 1; the value lives in the first
+    populated meter-map block (`0x2029`) as a signed i32 at the first meter event's +8
+    (block payload +23). Returns 1 for a default session. PT-corpus-confirmed: every
+    default session reads 1, and the renumbered 'THE WIND' session reads -2."""
+    for z, _e, c in _size_driven_blocks(data):
+        if c != 0x2029 or data[z + 9 : z + 14] != b"Meter":
+            continue
+        count = int.from_bytes(data[z + 20 : z + 24], "little")
+        if count >= 1:
+            return int.from_bytes(data[z + 32 : z + 36], "little", signed=True)
+    return 1
+
+
+def session_sample_rate(data: bytes) -> int:
+    """The session sample rate in Hz, from the `0x1028` INFO block (`u32` at block +11).
+    PT-corpus-confirmed across all 26 sessions (44100 / 48000 / 96000)."""
+    for z, _e, c in _size_driven_blocks(data):
+        if c == 0x1028:
+            return int.from_bytes(data[z + 11 : z + 15], "little")
+    raise ValueError("no 0x1028 sample-rate block")
+
+
+def session_bit_depth(data: bytes) -> int:
+    """The session recording bit depth, from the `0x1028` INFO block: a `u8` 5 bytes
+    before the payload end (block +(size+2)). 0x18 -> 24-bit, 0x20 -> 32-bit float;
+    other values pass through. PT-corpus-confirmed across all 26 sessions."""
+    for z, _e, c in _size_driven_blocks(data):
+        if c == 0x1028:
+            size = int.from_bytes(data[z + 3 : z + 7], "little")
+            return {0x18: 24, 0x20: 32}.get(data[z + size + 2], data[z + size + 2])
+    raise ValueError("no 0x1028 sample-rate block")
+
+
 def _lane_track_name(data: bytes, lane_zmark: int, lane_end: int) -> str:
     """Track/lane name: the length-prefixed string in the lane head (`<u32 len><len
     bytes>`). Read the exact length -- a greedy printable scan would swallow the
@@ -3508,6 +3600,430 @@ def remove_clip(data: bytes, lane_zmark: int, clip_index: int) -> bytes:
     first_offset = min(z for z, _e, _c in bl) + 7
     out[first_offset : first_offset + 4] = (ref.start - cut).to_bytes(4, "little")
     return bytes(out)
+
+
+def add_clip(data: bytes, lane_zmark: int, position: int,
+             region_index: "int | None" = None, template_clip_index: int = 0) -> bytes:
+    """Add a clip to the lane at `lane_zmark`, reusing a region already in the session.
+    The exact inverse of `remove_clip` (validated by round-trip = byte-identity).
+
+    A new placement is built by COPYING an existing placement in the lane
+    (`template_clip_index`, so its block layout/variant matches), then setting its
+    timeline `position` (the `u64` at `0x104F`+16) and, if `region_index` is given, its
+    region reference (the `u32` at `0x104F`+11, a 0-based index into the 0x2629 region
+    list — see `clip_names`). With `region_index=None` the template's region is kept, so
+    the default is "duplicate this clip at a new position". The placement is spliced in
+    after the lane's last clip; the lane's u32 count is incremented, enclosing block
+    sizes grown, and every master-index offset past the splice slid up.
+
+    `position` is the raw `u64`: plain samples for a sample-based track, or the encoded
+    tick value for a tick-based track (copy a sibling's high byte at +23; see spec §5d).
+    Reuses an EXISTING region only — it does not add a new region/audio file. (Structural
+    + reader-valid; PT display confirmation pending, like all write paths.)"""
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    lane = next((b for b in bl if b[0] == lane_zmark and b[2] == 0x1052), None)
+    if lane is None:
+        raise ValueError(f"no 0x1052 lane at zmark {lane_zmark}")
+    lane_end = lane[1]
+    placements = sorted(
+        (pz, pe) for pz, pe, c in bl if c == 0x1050 and lane_zmark < pz < lane_end
+    )
+    if not placements:
+        raise ValueError("lane has no existing clip to template the new placement from")
+    if not 0 <= template_clip_index < len(placements):
+        raise ValueError(f"template_clip_index {template_clip_index} out of range")
+    tz, te = placements[template_clip_index]
+    newp = bytearray(data[tz:te])                    # copy the template placement (0x1050 + 0x104F)
+    rel = next((z - tz for z, _e, c in bl if c == 0x104F and tz < z < te), None)
+    if rel is None:
+        raise ValueError("template placement has no 0x104F position record")
+    if region_index is not None:
+        newp[rel + 11 : rel + 15] = int(region_index).to_bytes(4, "little")
+    newp[rel + 16 : rel + 24] = int(position).to_bytes(8, "little")
+    grow = len(newp)
+    splice = placements[-1][1]                        # insert after the lane's last clip
+    count_pos = _lane_count_pos(data, lane_zmark, placements[0][0], len(placements))
+    recs = _FI.parse_records(ref.data, {c for _z, _e, c in bl}, {z for z, _e, _c in bl})
+    out = bytearray(data[:splice] + bytes(newp) + data[splice:])
+    for z, e, _c in bl:                              # grow the lane + its ancestors
+        if z <= lane_zmark and e >= splice:
+            out[z + 3 : z + 7] = (
+                int.from_bytes(out[z + 3 : z + 7], "little") + grow
+            ).to_bytes(4, "little")
+    if count_pos is not None:                        # increment the lane placement count
+        out[count_pos : count_pos + 4] = (
+            int.from_bytes(out[count_pos : count_pos + 4], "little") + 1
+        ).to_bytes(4, "little")
+    def shift(abs_pos: int, val: int) -> None:       # slide index offsets past the splice up
+        if val >= splice:
+            out[abs_pos + grow : abs_pos + grow + 4] = (val + grow).to_bytes(4, "little")
+    for r in recs:
+        for c in r.child_refs:
+            shift(ref.start + r.start + c.rel + 2, c.offset)
+        for e in r.elements:
+            for i, o in enumerate(e.offsets):
+                shift(ref.start + r.start + e.rel + 5 + 4 * i, o)
+    first_offset = min(z for z, _e, _c in bl) + 7    # repoint the first block at the moved index
+    out[first_offset : first_offset + 4] = (ref.start + grow).to_bytes(4, "little")
+    return bytes(out)
+
+
+def _locate_placement_104f(data: bytes, lane_zmark: int, clip_index: int) -> int:
+    """The 0x104F zmark of the `clip_index`-th clip in the lane at `lane_zmark`."""
+    bl = _size_driven_blocks(data)
+    lane_end = next((e for z, e, c in bl if z == lane_zmark and c == 0x1052), None)
+    if lane_end is None:
+        raise ValueError(f"no 0x1052 lane at zmark {lane_zmark}")
+    placements = sorted(
+        (pz, pe) for pz, pe, c in bl if c == 0x1050 and lane_zmark < pz < lane_end
+    )
+    if not 0 <= clip_index < len(placements):
+        raise ValueError(f"clip_index {clip_index} out of range ({len(placements)} clips)")
+    pz, pe = placements[clip_index]
+    z104f = next((z for z, _e, c in bl if c == 0x104F and pz < z < pe), None)
+    if z104f is None:
+        raise ValueError("placement has no 0x104F record")
+    return z104f
+
+
+def move_clip(data: bytes, lane_zmark: int, clip_index: int, position: int) -> bytes:
+    """Move a clip to a new timeline `position` (the `u64` at `0x104F`+16). Size-neutral
+    and index-neutral — an in-place field rewrite, so no reindex. `position` is the raw
+    u64 (plain samples for a sample-based track; copy a sibling's tick encoding for a
+    tick-based track — see spec §5d). A stereo clip has one lane per channel; move each.
+    (PT-confirmed that a clip's timeline start is governed solely by this field.)"""
+    z104f = _locate_placement_104f(data, lane_zmark, clip_index)
+    out = bytearray(data)
+    out[z104f + 16 : z104f + 24] = int(position).to_bytes(8, "little")
+    return bytes(out)
+
+
+def replace_clip_region(data: bytes, lane_zmark: int, clip_index: int,
+                        region_index: int) -> bytes:
+    """Repoint a clip at a different EXISTING region (the `u32` at `0x104F`+11, a 0-based
+    index into the 0x2629 region list — see `clip_names`/`region_names`). Size- and
+    index-neutral in-place rewrite. Changes which source audio the clip plays; does not
+    add a new region/file. Verify the target with `region_names(data)[region_index]`."""
+    z104f = _locate_placement_104f(data, lane_zmark, clip_index)
+    out = bytearray(data)
+    out[z104f + 11 : z104f + 15] = int(region_index).to_bytes(4, "little")
+    return bytes(out)
+
+
+def session_info(data: bytes) -> dict:
+    """A consolidated read-only snapshot of an arbitrary session, from the confirmed
+    read primitives: format (sample rate / bit depth / start bar), block/track/clip/
+    region/marker counts, and the clip lanes with their names and clip counts."""
+    from collections import Counter
+    bl = _size_driven_blocks(data)
+    ctc = Counter(c for _z, _e, c in bl)
+    return {
+        "sample_rate": session_sample_rate(data),
+        "bit_depth": session_bit_depth(data),
+        "start_bar": session_start_bar(data),
+        "n_blocks": len(bl),
+        "n_tracks": ctc.get(0x261B, 0),          # one 0x261B per track of any type
+        "n_clips": ctc.get(0x1050, 0),
+        "n_regions": ctc.get(0x2628, 0),
+        "n_markers": ctc.get(0x2077, 0),
+        "clip_lanes": [(name, k) for _z, name, k in clip_lanes(data)],
+    }
+
+
+def clips(data: bytes) -> "list[dict]":
+    """Every placed clip in the session, as dicts with: `track` (the lane's track name),
+    `clip_index` (rank within the lane, as `remove_clip`/`move_clip` take), `name` (the
+    region/source name), `position` (the raw `u64` timeline position), and `lane_zmark`
+    (to pass to the edit functions). The whole clip inventory in one call — combines
+    `clip_lanes`, the placement `0x104F` fields, and the 0x2629 region list."""
+    bl = _size_driven_blocks(data)
+    rnames = _region_list_names(data, bl)
+    p104f = sorted(z for z, _e, c in bl if c == 0x104F)          # placement position records
+    out: "list[dict]" = []
+    for lz, tname, _k in clip_lanes(data):
+        lane_end = next(e for z, e, c in bl if z == lz and c == 0x1052)
+        pls = sorted((pz, pe) for pz, pe, c in bl if c == 0x1050 and lz < pz < lane_end)
+        for ci, (pz, pe) in enumerate(pls):
+            z = next((z for z in p104f if pz < z < pe), None)
+            if z is None:
+                continue
+            ref = int.from_bytes(data[z + 11 : z + 15], "little")
+            out.append({
+                "track": tname, "clip_index": ci,
+                "name": rnames[ref] if 0 <= ref < len(rnames) else "",
+                "position": int.from_bytes(data[z + 16 : z + 24], "little"),
+                "lane_zmark": lz,
+            })
+    return out
+
+
+def remove_track(data: bytes, track_name: str) -> bytes:
+    """Remove an AUDIO track (with all its clips) from an arbitrary session, leaving every
+    other track/clip/plugin/automation intact.
+
+    Unlike clip edits, a track's blocks are *indexed*, so this splices out the track's
+    whole block-set — its track-list entries (0x1014/0x251A), its lane(s) (0x1052, with
+    their placements) in the shared 0x1054 container, its 0x261C playlist subtree (0x261B
+    detail, view chain, per-track plugin/routing state), and its name-table string(s) — and
+    rebuilds the master index by dropping the child-refs/element-offsets that pointed at the
+    removed blocks and offset-shifting the survivors (the index round-trips parse->serialize
+    byte-exactly, so this is exact). The track's source regions/audio files linger in the
+    clips bin (harmless; matches clip removal). Currently handles AUDIO tracks (raises for
+    MIDI/aux/bus/master, whose subtree differs) and unique names. rc=0 + index-resolves +
+    other-tracks-byte-intact are corpus-validated; PT display confirmation pending."""
+    nb = track_name.encode()
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    zend = {z: e for z, e, _c in bl}
+    zct = {z: c for z, _e, c in bl}
+
+    def innermost(j: int):
+        best = None
+        for z, e, c in bl:
+            if z < j < e and (best is None or z > best[0]):
+                best = (z, e, c)
+        return best
+
+    def guids_in(blk: bytes) -> "list[bytes]":
+        # a track-list entry stores its 8-byte GUID after a `2A 00 00 00` tag
+        out, k = [], 0
+        while True:
+            k = blk.find(b"\x2a\x00\x00\x00", k)
+            if k < 0 or k + 12 > len(blk):
+                break
+            out.append(blk[k + 4 : k + 12])
+            k += 1
+        return out
+
+    ident: "set[int]" = set()          # zmarks of the track's blocks
+    nt_ranges: "list[tuple[int, int]]" = []  # name-table string byte-ranges (not blocks)
+    seed_guids: "set[bytes]" = set()
+    pos = 0
+    while True:
+        j = data.find(nb, pos)
+        if j < 0:
+            break
+        if j >= 4 and int.from_bytes(data[j - 4 : j], "little") == len(nb):
+            b = innermost(j)
+            if b:
+                z, e, c = b
+                if c in (0x1014, 0x251A):               # track-list entry: seed the GUID
+                    ident.add(z)
+                    seed_guids.update(guids_in(data[z:e]))
+                elif c == 0x1052:                       # a lane (with its placements)
+                    ident.add(z)
+                elif c == 0x2519:                       # the length-prefixed name in the name table
+                    nt_ranges.append((j - 4, j + len(nb)))
+        pos = j + 1
+    # link name -> track-list GUID -> the 0x102D that carries it -> its enclosing 0x261C subtree
+    # (robust even when the track name isn't stored inside the detail subtree)
+    for z, e, c in bl:
+        if c == 0x102D and any(g in data[z:e] for g in seed_guids):
+            cs = [(cz, ce) for cz, ce, cc in bl if cc == 0x261C and cz < z < ce]
+            if cs:
+                pz, pe = max(cs)
+                ident |= {zz for zz, _ee, _cc in bl if pz <= zz < pe}
+    if not any(zct[z] == 0x261B for z in ident):
+        raise ValueError(
+            f"cannot locate track {track_name!r} (not found, or a non-audio track type)")
+
+    # outermost removed blocks (a subtree parent covers its children) + the name-table strings
+    ranges = [(z, zend[z]) for z in ident
+              if not any(zz < z and zend[zz] >= zend[z] for zz in ident if zz != z)]
+    ranges = sorted(ranges + nt_ranges)
+    merged: "list[tuple[int, int]]" = []
+    for z, e in ranges:
+        if merged and z <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((z, e))
+    ranges = merged
+
+    def shift(o: int) -> "int | None":
+        s = 0
+        for z, e in ranges:
+            if e <= o:
+                s += e - z
+            elif z < o < e:
+                return None                              # inside a removed range
+        return o - s
+
+    body = bytearray()
+    prev = 0
+    for z, e in ranges:
+        body += data[prev:z]
+        prev = e
+    body += data[prev : ref.start]
+    for z, e, _c in bl:                                  # shrink enclosing containers
+        if z in ident:
+            continue
+        inside = sum((re - rz) for rz, re in ranges if z < rz and e >= re)
+        if inside:
+            nz = shift(z)
+            if nz is not None:
+                body[nz + 3 : nz + 7] = (
+                    int.from_bytes(body[nz + 3 : nz + 7], "little") - inside
+                ).to_bytes(4, "little")
+
+    recs = _FI.parse_records(ref.data, set(zct.values()), set(zct))
+    def _in(o: int) -> bool:
+        return any(z <= o < e for z, e in ranges)
+    for r in recs:
+        r.child_refs = [c for c in r.child_refs if not _in(c.offset)]
+        for c in r.child_refs:
+            c.offset = shift(c.offset)
+        new_elems = []
+        for el in r.elements:
+            offs = [shift(o) for o in el.offsets if not _in(o)]
+            if offs:
+                el.offsets = offs
+                new_elems.append(el)
+        r.elements = new_elems
+    return _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
+
+
+def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
+    """Add an AUDIO track by DUPLICATING an existing one under `new_name` — the inverse of
+    `remove_track`, validated by round-trip byte-identity (`duplicate_track` then
+    `remove_track(new_name)` == original).
+
+    Copies the source track's block-set (track-list entries 0x1014/0x251A, lane(s) 0x1052
+    in the shared 0x1054, and the 0x261C playlist subtree), substituting the track name and
+    giving each channel a fresh GUID; inserts each copy after its source; grows the
+    enclosing containers; and adds the new blocks' master-index references (offset-shifting
+    the rest via the same parse->modify->serialize rank-rebuild remove_track uses). The copy
+    shares the source's clips/regions (a true duplicate).
+
+    v1 constraints: `new_name` must be the SAME LENGTH as `source_track` (a different length
+    changes block sizes — a planned refinement); audio tracks only; unique source name.
+    rc=0 + index-resolves + round-trip byte-identity are corpus-validated; PT display
+    confirmation and exact PT track-order placement are pending."""
+    if len(new_name) != len(source_track):
+        raise ValueError("v1: new_name must be the same length as source_track")
+    ref = _FI.final_index_ref(data)
+    bl = sorted(_raw_block_bounds(data, ref.start))
+    zend = {z: e for z, e, _c in bl}
+    zct = {z: c for z, _e, c in bl}
+
+    def guids_in(blk: bytes) -> "list[bytes]":
+        out, k = [], 0
+        while True:
+            k = blk.find(b"\x2a\x00\x00\x00", k)
+            if k < 0 or k + 12 > len(blk):
+                break
+            out.append(blk[k + 4 : k + 12])
+            k += 1
+        return out
+
+    def innermost(j: int):
+        best = None
+        for z, e, c in bl:
+            if z < j < e and (best is None or z > best[0]):
+                best = (z, e, c)
+        return best
+
+    sb, nn = source_track.encode(), new_name.encode()
+    ident: "set[int]" = set()
+    seed: "set[bytes]" = set()
+    nt_ranges: "list[tuple[int, int]]" = []
+    pos = 0
+    while True:
+        j = data.find(sb, pos)
+        if j < 0:
+            break
+        if j >= 4 and int.from_bytes(data[j - 4 : j], "little") == len(sb):
+            b = innermost(j)
+            if b:
+                z, e, c = b
+                if c in (0x1014, 0x251A):
+                    ident.add(z)
+                    seed.update(guids_in(data[z:e]))
+                elif c == 0x1052:
+                    ident.add(z)
+                elif c == 0x2519:
+                    nt_ranges.append((j - 4, j + len(sb)))
+        pos = j + 1
+    for z, e, c in bl:
+        if c == 0x102D and any(g in data[z:e] for g in seed):
+            cs = [(cz, ce) for cz, ce, cc in bl if cc == 0x261C and cz < z < ce]
+            if cs:
+                pz, pe = max(cs)
+                ident |= {zz for zz, _ee, _cc in bl if pz <= zz < pe}
+    if not any(zct[z] == 0x261B for z in ident):
+        raise ValueError(f"cannot locate audio track {source_track!r}")
+
+    # fresh per-channel GUIDs (deterministic, guaranteed absent)
+    gmap: "dict[bytes, bytes]" = {}
+    for g in seed:
+        ng = bytes(b ^ 0x5A for b in g)
+        while ng in data or ng in gmap.values():
+            ng = bytes(b ^ 0x37 for b in ng)
+        gmap[g] = ng
+
+    def transform(blk: bytes) -> bytes:
+        blk = blk.replace(sb, nn)
+        for g, ng in gmap.items():
+            blk = blk.replace(g, ng)
+        return blk
+
+    # outermost copy-units + name-table strings -> insert a transformed copy after each
+    units = sorted((z, zend[z]) for z in ident
+                   if not any(zz < z and zend[zz] >= zend[z] for zz in ident if zz != z))
+    inserts = [(e, transform(data[z:e]), z) for z, e in units]
+    inserts += [(b, transform(data[a:b]), None) for a, b in nt_ranges]
+    inserts.sort()
+
+    def shift(o: int) -> int:
+        return o + sum(len(ins) for at, ins, _su in inserts if at <= o)
+
+    body = bytearray()
+    prev = 0
+    unit_copy: "dict[int, int]" = {}   # source unit start -> its copy's new-body start
+    for at, ins, su in inserts:
+        body += data[prev:at]
+        if su is not None:
+            unit_copy[su] = len(body)
+        body += ins
+        prev = at
+    body += data[prev : ref.start]
+
+    def copy_off(src_block: int) -> "int | None":
+        for z, e in units:
+            if z <= src_block < e:
+                return unit_copy[z] + (src_block - z)
+        return None
+
+    for z, e, _c in bl:                              # grow enclosing containers
+        if z in ident:
+            continue
+        grow = sum(len(ins) for at, ins, _su in inserts if z < at < e)
+        if grow:
+            nz = shift(z)
+            body[nz + 3 : nz + 7] = (
+                int.from_bytes(body[nz + 3 : nz + 7], "little") + grow
+            ).to_bytes(4, "little")
+
+    recs = _FI.parse_records(ref.data, set(zct.values()), set(zct))
+    for r in recs:                                   # add a copy ref per source ref; shift the rest
+        ncr = []
+        for c in r.child_refs:
+            ncr.append((c, False))
+            if c.offset in ident:
+                ncr.append((_FI.ChildRef(rel=0, child_type=c.child_type,
+                                         offset=copy_off(c.offset), flags=c.flags), True))
+        for c, is_copy in ncr:
+            if not is_copy:
+                c.offset = shift(c.offset)
+        r.child_refs = [c for c, _ in ncr]
+        for el in r.elements:
+            no = []
+            for o in el.offsets:
+                no.append((o, False))
+                if o in ident:
+                    no.append((copy_off(o), True))
+            el.offsets = [o if is_copy else shift(o) for o, is_copy in no]
+    return _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
 
 
 # --- arbitrary track naming --------------------------------------------------

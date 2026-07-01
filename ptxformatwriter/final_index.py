@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import writer as W
+from .core import Block
 
 
 @dataclass
@@ -416,11 +417,41 @@ def block_layout(data: bytes) -> tuple[dict[int, int], dict[int, list[int]]]:
 
 
 def final_index_ref(data: bytes) -> W.BlockRef | None:
-    """The trailing 0x0002 block, or None if the file has no master index."""
-    refs = W.top_level_refs(data)
-    if not refs or refs[-1].block.content_type != 0x0002:
+    """The trailing 0x0002 block, or None if the file has no master index.
+
+    Fast path: top-level blocks are contiguous, so walk them by declared size to the
+    last block instead of running the full scan parser (`top_level_refs`, ~1s on an
+    8 MB session). Verified byte-identical to the scan-parser result across the corpus.
+    Since nearly every reader/editor calls this, it dominates their runtime."""
+    n = len(data)
+    # first top-level block = the first validly-framed 0x5A
+    z, pos = None, 0
+    while True:
+        k = data.find(b"\x5a", pos)
+        if k < 0:
+            break
+        bt = int.from_bytes(data[k + 1 : k + 3], "little")
+        size = int.from_bytes(data[k + 3 : k + 7], "little")
+        if not (bt & 0xFF00) and size > 0 and k + 7 + size <= n:
+            z = k
+            break
+        pos = k + 1
+    if z is None:
         return None
-    return refs[-1]
+    last = None
+    while z is not None and z + 9 <= n:
+        bt = int.from_bytes(data[z + 1 : z + 3], "little")
+        size = int.from_bytes(data[z + 3 : z + 7], "little")
+        end = z + 7 + size
+        if (bt & 0xFF00) or size <= 0 or end > n:
+            break
+        last = (z, bt, size, int.from_bytes(data[z + 7 : z + 9], "little"))
+        z = end if end < n else None
+    if last is None or last[3] != 0x0002:
+        return None
+    zz, bt, size, _ct = last
+    block = Block(zmark=zz, block_type=bt, block_size=size, content_type=0x0002, offset=zz + 7)
+    return W.BlockRef(block=block, start=zz, end=zz + 7 + size, data=data[zz : zz + 7 + size])
 
 
 def offset_holes(data: bytes) -> tuple["W.BlockRef | None", list[tuple[int, int, int, int, str]]]:

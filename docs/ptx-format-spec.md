@@ -146,7 +146,7 @@ upstream parser; structure notes are from this project's decode work.
 |---|---|
 | `0x262A` | AUDIO region list (count-prefixed: `2*N` region records for N stereo clips) |
 | `0x2629` | AUDIO region (name, channel, length, GUID, **findex** → file — §6, §9) |
-| `0x2628` | Region name/group sub-block (inside `0x2629`) |
+| `0x2628` | Region **record** (inside `0x2629`): a length-prefixed **name** (`<u32 len @+9><name @+13>`) — the clip/source name shown in the bin (e.g. `voc 1_01`, `VPS kit 1.grp.L`), present on **100%** of corpus records — followed by geometry + fade children (`0x2523`→`0x2526`). `body_synth.region_names()` reads them. |
 
 ### Placements (regions on the timeline)
 | Type | Meaning |
@@ -187,6 +187,165 @@ upstream parser; structure notes are from this project's decode work.
 ### Display / view-state (PT recomputes; writers can leave conservative values)
 `0x2624` (playlist/edit-window order — §12), `0x2587`, `0x2016`, `0x2519`-adjacent view
 blocks, `0x2519`/`0x2624` child tables. These are sensitive to the index (§11).
+
+---
+
+## 5b. Block grammar — corpus-derived containment
+
+Walking every block by declared size (not by scanning for the `0x5A` magic — see §14) on
+a 26-session / ~1.4M-block corpus yields a stable **containment grammar**: which
+content-type nests inside which. The dominant parent→child edges below (each holding on
+≥20 of 26 sessions) map the format's skeleton; `(NEW)` marks types not previously cataloged.
+
+**Audio files** — `0x1004` → `0x1003` (descriptor) → { `0x1001` samplerate · `0x1033` `(NEW)`,
+1:1 per descriptor · `0x2106` UMID }.
+
+**Regions** — `0x262A` (list) → `0x2629` (entry) → `0x2628` (record: name + geometry) →
+{ `0x2523` → `0x2526` crossfade pair `(NEW)` · `0x2636` `(NEW)` }. A parallel per-track
+name subtree: `0x2627` → `0x2625` `(NEW)` → `0x2626` `(NEW)` (the highest-count records
+after placements; one `0x2626` per region instance).
+
+**Placements (clips on the timeline)** — `0x1054` (track audio container) → `0x1052` (lane,
+holds the u32 placement count) → `0x1050` → `0x104F` (region-ref @+11, 8-byte position @+16).
+A second placement path `0x1057` → `0x1056` `(NEW)` → `0x104F` also occurs (~1.6% of
+placements). See §8 and `body_synth.clip_lanes` / `remove_clip`.
+
+**Tracks** — `0x1015` → `0x1014` (audio track list/name); `0x2519` → `0x251A` → `0x4420`
+`(NEW)` (MIDI/click). The per-track detail subtree under `0x261B` is large and mostly
+view/automation state: `0x261B` → { `0x260D` `(NEW)` → { `0x260A` · `0x260C` · `0x260E` }
+`(NEW)` · `0x102D` → `0x2619` → `0x4301` `(NEW)` · `0x1029` `(NEW)` · `0x2627` }.
+
+**Conductor** — `0x2028`/`0x2718` tempo, `0x2029`/`0x2719` meter, `0x2030`/`0x2077` markers
+(§10). `0x2077` → `0x2506`: a **fixed 17-byte scaffold** (constant payload
+`…06 25 FF FF FF FF 00 00 00 00`), emitted **track-count** times per marker — *not*
+waveform data (see §5c).
+
+**View / display (PT recomputes — leave conservative)** — `0x200A`/`0x200B`/`0x2015` →
+`0x2038` `(NEW)` → `0x2037` `(NEW)`; `0x203B` view-volume signature (§ click/view fix),
+under `0x2580` automation lane or the `0x2015` display chain; the large `0x2613`/`0x2615`/
+`0x2616` `(NEW)` view blocks (median ~850 B).
+
+> Caveat: the size-driven walk still admits <1% phantom blocks (data bytes that frame like a
+> small block), so rare edges may be noise; the high-frequency edges above are reliable.
+
+---
+
+## 5c. Corpus-verified record details (2026-06-30 dissection)
+
+A parallel dissection of the 26-session corpus, each finding adversarially re-derived on
+fresh sessions, pinned the following. Two are confirmed against **corpus ground truth**
+(a renumbered session; the bak.075→076 add-clip pair).
+
+**Placement → region link (`0x104F` +11) — confirmed.** The `u32` at block offset **+11**
+is a **0-based index into the `0x2629` region-instance list** in file (block-scan) order;
+the clip's source name is the `0x2628` name nested in that `0x2629`. (NOT the raw all-`0x2628`
+order — that mis-resolves on sessions with standalone regions.) Ground truth: the two clips
+that bak.076 adds resolve to the two regions it adds (`Reverse Rewire_M1.1_16.L/.R`), and a
+`Wolf Wet` track's clips resolve to `Wolf Wet.L/.R`. Refs are **positional** — inserting a
+region before index N renumbers every ref ≥ N (load-bearing for add-clip). →
+`body_synth.clip_names(data, lane_zmark)`.
+
+**Session start bar (`0x2029` meter) — confirmed.** Pro Tools can renumber a session to start
+at an arbitrary bar (`-2`, `0`, `2`, …). The start bar is a **signed `i32` at the first meter
+event's +8** (block payload **+23**) of the `0x2029` "Meter" block — header
+`"Meter"(5) | 0x0002:u16 | plen:u32 | count:u32`, with `plen = 12 + 52·count` and events at
+payload+15. `=1` for a default session; the renumbered corpus session **THE WIND reads `-2`**.
+The bar-1 tick origin `0xE8D4A51000` is *unchanged* by renumbering. →
+`body_synth.session_start_bar(data)`. (Multi-event meter records are variable-length; only
+event 0 — the session start — is mapped. See `TODO.md`.)
+
+**Track subtree (`0x261B`).** Exactly **one `0x261B` per track of any type** (audio / MIDI /
+click / aux / bus / master) → count == total track count. Each has one `0x102D` (track name in
+a nested `0x2619`, then an 8-byte track **GUID** after a `2A 00 00 00` tag), one `0x2627`, and
+N `0x260D` routing nodes. Cross-track linkage is by the 8-byte GUID, not a numeric index.
+`0x260A` = a 32-byte automation-breakpoint frame (5-byte tick @+18, `i16` value @+25).
+Groundwork for add/remove-track.
+
+**Scaffolding records (constant, data-free).** `0x1033` — fixed 9-byte block
+`5A 02 00 02 00 00 00 33 10`, one per `0x1003` descriptor. `0x2626` — 2-byte empty terminator;
+`0x2625` — 11-byte wrapper of one empty `0x2626`; `0x2627` — container with an explicit
+`u16` slot-count (= 11) at payload **+9**, children starting at **+11**. These carry no region
+data (rules them out as a clip-name store). A writer emits them as constants; a reader skips them.
+
+---
+
+## 5d. Round-2 dissection — editing-relevant records (2026-06-30)
+
+A second corpus wave (correlation-driven, adversarially verified). Confidence is marked;
+refuted over-claims are noted so they aren't re-trusted.
+
+**Session sample rate & bit depth (`0x1028`).** *(verified, all 26 sessions)* sample rate =
+`u32` at block **+11**; recording bit depth = `u8` at block **+(size+2)** (5 before the
+payload end): `0x18`→24-bit, `0x20`→32-bit float. → `session_sample_rate()`,
+`session_bit_depth()`. (The `0x1028` payload may carry an optional embedded "IO Settings"
+path before that byte; it stays end-anchored.)
+
+**Clip placement (`0x104F`) — consolidated.** *(verified high)* `+11` `u32` = region index
+into the `0x2629` list (→ `clip_names`); `+15` = const `0x00`; `+16` `u64` = timeline
+position (→ `clip_positions` / `set_clip_position`). For a **sample**-based track the u64 is
+plain samples (base 0); for a **tick**-based track it is `0x4000000000000000 + 0xE8D4A51000 +
+tick_offset`, with the top byte at `+23` a timebase marker (`0x00`=sample, `0x40`=tick; other
+nibbles occur — treat as opaque). Two block variants coexist: subtype `0x0008`/size 34 and
+subtype `0x000A`/size 37 (3 extra tail bytes); `+11` and `+16` hold in both.
+
+**Fades / crossfades.** *(verified high)* Simple clip fades sit in a contiguous `0x262F` run
+bracketed by a `0x2630` opener (entry count = `u32` @ payload+9, == run length, cross-checked
+on 7 sessions) and a `0x262E` closer, immediately before the placement list. Each `0x262F`:
+marker `@payload+5` (low nibble = fade-IN byte-width, high nibble = fade-OUT width, 0 =
+absent), then LE IN then OUT lengths in **samples**, then a 2-byte curve-shape pair (trailer
+length set by `shape_a` alone: 01→20 B, 02→13 B, 03→10 B). Adding one clip adds exactly one
+`0x262F`. Richer crossfades are `0x2523`→`0x2526` records nested `0x262C`→`0x262B`→`0x2628`.
+(`0x2423` is **not** a fade — it holds track-**group** name strings.)
+
+**Plugins / I-O — the preserve-precisely set.** *(verified high)* `0x1017` is the session's
+plugin-type **catalog** (blocktype `0x04` older / `0x06` newer): per entry a category byte, a
+length-prefixed display name (e.g. `Altiverb 7`), a 12-byte plugin id, and a 4-byte (in,out)
+IO; the entry count tracks plugin richness. Per-instance plugin **state** nests
+`0x2616 ⊃ 0x2615 ⊃ 0x2613 ⊃ 0x1038` (all counts == plugin-instance count). The I-O routing
+table is a per-session singleton `0x2603 ⊃ 0x2602` (length-prefixed paths) `⊃ 0x2601` (1:1).
+All are byte-stable under clip/region edits → copy verbatim. **Do not** assume a fixed safe
+prefix when relocating a plugin blob: the churn boundary is plugin-specific and can begin
+near the head. (The literal `0x4403/0x4420/0x4301` codes do *not* exist as standalone blocks.)
+
+**Region geometry (`0x2628`) — descriptor model (PARTIAL — not add/replace-ready).** After
+the name (`noff = z+13+namelen`) a 5-byte descriptor `[b0..b4]` precedes variable-width LE
+sample fields whose byte-widths are the **nibbles of `b1,b2,b3`** (slot order
+`[b1.hi,b1.lo,b2.hi,b2.lo,b3.hi,b3.lo]`, 0 = absent); `b4` is a form marker (`0x08` trimmed /
+`0x00` whole-file). The model reproduces exactly on clean audio families (final field = clip
+length in samples), **but** the slot→meaning mapping is not stable across all subtypes
+(grouped `.grp` regions and some `0x1004` record types break it), and the "final field ==
+source-file length" correlation was **refuted** as universal. See `TODO.md`.
+
+**Automation (`0x260A`) — correction.** `0x260A` is **variable-length** (not a fixed 39-byte
+single point): it holds an inner breakpoint **array** (count near payload+10; ~6 B/breakpoint
++ a 6-byte terminator). `flag@payload+8` ⇄ tick-present is exact; `tick@payload+18` is a
+5-byte absolute conductor tick. Full per-parameter lane mapping still open (`TODO.md`).
+
+---
+
+## 5e. Edit footprints — from backup-chain diffs
+
+Consecutive `.bak.NNN` saves are single real Pro Tools edits. Diffing block-type counts
+across the chains (Reverse Rewire 073–079, #Hipsters 040–046) gives the byte footprint of
+each operation — the recipe a writer reproduces.
+
+| Edit | Block-count delta |
+|---|---|
+| **Remove clip** | −1 `0x104F`, −1 `0x1050` (the placement pair; region/file left in the bin) |
+| **Add clip, reuse region** | +1 `0x104F`, +1 `0x1050` |
+| **Add clip, new audio** | placement + region (`+0x2628`,`+0x2629`) + file descriptor (`+0x1001`,`+0x1003`,`+0x1033`,`+0x2106`) |
+| **Add fade** | +1 `0x262F` per faded clip (crossfade also adds `0x2523`/`0x2526`/`0x2423`/`0x262B`) |
+| **Add track** | +1 `0x261B` + a track-list entry (`0x1014`/`0x251A`) + the `0x261B` subtree + scaffolding (`0x2506`,`0x2625`,`0x2626`,`0x260A`,`0x260C`,`0x260E`) |
+| **Remove track** | the inverse (Hipsters bak.044→045: −1 `0x261B`, −1 `0x1014`, −`0x2506`/`0x2625`/`0x2626`) |
+| **Renumber start bar** | `0x2029` meter-event `i32` (§5c) — no block-count change |
+
+**Implemented** (all reindex via the size-driven offset-shift engine, validated by
+**round-trip byte-identity** across all 26 corpus sessions): `remove_clip`, `add_clip`
+(reuse region), `move_clip`, `replace_clip_region`, plus the readers `clip_names`,
+`region_names`, `session_start_bar`, `session_sample_rate`, `session_bit_depth`,
+`session_info`. Add/remove-track is the next build: its blocks are **indexed** and the
+lanes of *all* audio tracks share one `0x1054` container, so it needs a **rank-rebuild** of
+the master index (not just an offset-shift) — scoped in `TODO.md`.
 
 ---
 
