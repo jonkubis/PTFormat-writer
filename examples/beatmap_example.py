@@ -2,7 +2,7 @@
 
 This is an *application* built on top of `ptxformatwriter` — not part of the library itself.
 It takes a beatmapping-software MIDI export (tempo map, meter map, named markers, and a
-`0xFA` Start message marking the audio head-sync) plus a set of MP3s, and produces ONE
+CC#119/channel-16 head-sync marker) plus a set of MP3s, and produces ONE
 self-contained session: N stereo tracks (one MP3 clip each, all starting at the head-sync),
 the tempo/meter maps, the markers, and an optional click track on top.
 
@@ -43,7 +43,8 @@ class Beatmap:
     tempos: list = field(default_factory=list)  # [(midi_tick, bpm)]
     meters: list = field(default_factory=list)  # [(midi_tick, numerator, denominator)]
     markers: list = field(default_factory=list)  # [(midi_tick, name)]
-    head_sync_tick: "int | None" = None         # the 0xFA Start tick
+    head_sync_tick: "int | None" = None         # CC#119/ch16 = 127 (or legacy 0xFA)
+    tail_sync_tick: "int | None" = None         # CC#119/ch16 = 0   (or legacy 0xFC)
 
     def pt_tick(self, midi_tick: int) -> int:
         return midi_tick * (PT_TICKS_PER_QUARTER // self.division)
@@ -70,8 +71,10 @@ def _varlen(b: bytes, i: int):
 
 def parse_beatmap_midi(path) -> Beatmap:
     """Parse a Standard MIDI File: tempo (FF 51), time-signature (FF 58), marker (FF 06)
-    meta events, and the 0xFA Start real-time message (the head-sync). All ticks are
-    absolute MIDI ticks. Handles running status."""
+    meta events, and the audio head/tail transport — MIDI Control Change #119 on
+    channel 16 (value 127 = head-sync, value 0 = tail), with the legacy 0xFA/0xFC
+    real-time messages still accepted as a fallback. All ticks are absolute MIDI ticks.
+    Handles running status."""
     d = Path(path).read_bytes()
     if d[:4] != b"MThd":
         raise ValueError("not a Standard MIDI File")
@@ -97,13 +100,24 @@ def parse_beatmap_midi(path) -> Beatmap:
             elif b0 in (0xF0, 0xF7):
                 ln, j = _varlen(d, i + 1); i = j + ln
             elif b0 >= 0xF8:
+                # legacy real-time transport (superseded by CC#119/ch16 below, kept
+                # for back-compat): 0xFA = head-sync, 0xFC = tail.
                 if b0 == 0xFA and bm.head_sync_tick is None:
                     bm.head_sync_tick = t
+                elif b0 == 0xFC and bm.tail_sync_tick is None:
+                    bm.tail_sync_tick = t
                 i += 1
             else:
                 if b0 & 0x80:
                     status = b0; i += 1
-                i += 1 if (status & 0xF0) in (0xC0, 0xD0) else 2
+                two = (status & 0xF0) not in (0xC0, 0xD0)
+                # CC#119 on channel 16 (status 0xBF): 127 = audio head-sync, 0 = tail.
+                if status == 0xBF and d[i] == 119:
+                    if d[i + 1] == 127 and bm.head_sync_tick is None:
+                        bm.head_sync_tick = t
+                    elif d[i + 1] == 0 and bm.tail_sync_tick is None:
+                        bm.tail_sync_tick = t
+                i += 2 if two else 1
         pos = end
     if not bm.tempos:
         bm.tempos = [(0, 120.0)]
@@ -134,7 +148,7 @@ def build_session_from_beatmap(midi_path, mp3_paths, out_ptx, controls: Controls
     Converts each MP3 -> a 44.1k/24-bit/stereo WAV in `out_ptx`'s `Audio Files/` folder,
     builds N stereo tracks (named after `track_names` or the MP3 stems), writes the tempo
     map / meter map / markers from the MIDI, places each MP3's clip on its track at the
-    0xFA head-sync, and (when `click` and `controls.click_ref` are set) adds a Click track as
+    head-sync, and (when `click` and `controls.click_ref` are set) adds a Click track as
     the first/top track. Returns the parsed Beatmap. The .ptx + Audio Files (+ WaveCache.wfm)
     are self-contained at `out_ptx.parent`.
 
@@ -203,7 +217,7 @@ def _main(argv=None) -> int:
     from ptxformatwriter.donorpack import load_controls
 
     ap = argparse.ArgumentParser(description="Build a Pro Tools .ptx from a beatmap MIDI + MP3 stems.")
-    ap.add_argument("midi", help="Standard MIDI file (tempo/meter/markers + 0xFA head-sync)")
+    ap.add_argument("midi", help="Standard MIDI file (tempo/meter/markers + CC#119 head-sync)")
     ap.add_argument("out_ptx", help="output .ptx path (Audio Files/ + WaveCache.wfm go beside it)")
     ap.add_argument("mp3s", nargs="+", help="one or more audio stems (one stereo track each)")
     src = ap.add_mutually_exclusive_group(required=True)
