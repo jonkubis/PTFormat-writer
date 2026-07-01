@@ -4180,6 +4180,30 @@ def _fix_container_counts(data: bytes) -> bytes:
     return bytes(out)
 
 
+def _fix_name_table_count(data: bytes) -> bytes:
+    """Update the `0x2519` name table's INLINE entry count (`u16` at payload+0x0e, present in
+    the `format_version >= 8` layout) to match the actual inline name entries, after a track
+    add/remove changed them. Pro Tools reads this count to bound the inline entry list; a
+    stale count runs the read past the last real entry into the framed children -> end of
+    stream. Size-neutral (no reindex). Idempotent on an already-consistent session."""
+    bl = _size_driven_blocks(data)
+    out = bytearray(data)
+    for z, e, c in bl:
+        if c != 0x2519 or int.from_bytes(data[z + 1 : z + 3], "little") < 8:
+            continue
+        children = [zz for zz, _ee, _cc in bl if z < zz < e]
+        end = min(children) if children else e
+        q, n = z + 9 + 0x14, 0                       # entries begin at payload+0x14 (v>=8)
+        while q < end:
+            nlen = int.from_bytes(data[q : q + 4], "little")
+            if not (0 < nlen <= 64):
+                break
+            q += 4 + nlen + _NAME_ENTRY_SUFFIX
+            n += 1
+        out[z + 9 + 0x0E : z + 9 + 0x10] = n.to_bytes(2, "little")
+    return bytes(out)
+
+
 def validate(data: bytes) -> "list[dict]":
     """Catch Pro Tools "end of stream" failures BEFORE writing by replicating PT's
     count-driven read of the objects our size-driven reader is too permissive about.
@@ -4336,8 +4360,8 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                 el.offsets = offs
                 new_elems.append(el)
         r.elements = new_elems
-    return _fix_container_counts(
-        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs)))
+    return _fix_name_table_count(_fix_container_counts(
+        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))))
 
 
 def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
@@ -4482,8 +4506,8 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                 if o in ident:
                     no.append((copy_off(o), True))
             el.offsets = [o if is_copy else shift(o) for o, is_copy in no]
-    return _fix_container_counts(
-        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs)))
+    return _fix_name_table_count(_fix_container_counts(
+        _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))))
 
 
 # --- arbitrary track naming --------------------------------------------------

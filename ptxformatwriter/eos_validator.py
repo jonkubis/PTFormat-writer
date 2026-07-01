@@ -54,6 +54,7 @@ TRAILER_MARK_OFF = 6           # offset of the 0x0000002A marker inside the trai
 TRAILER_MARK = 0x2A
 ENTRY_START_V8PLUS = 0x14      # first name entry, format_version >= 8
 ENTRY_START_V_LOW = 0x16       # first name entry, format_version < 8
+ENTRY_COUNT_OFF = 0x0E         # u16 inline-entry count in the format_version >= 8 preamble
 
 
 def _u16(b: bytes, o: int) -> int:
@@ -129,6 +130,17 @@ def check_name_table(data: bytes, blocks, z: int, e: int) -> int:
                 f"(the name-entry list is out of sync with the track edit)")
         q = entry_end
         idx += 1
+
+    # format_version >= 8 stores an explicit inline-entry count in the preamble; the reader
+    # reads exactly that many entries. A stale count reads one entry too many (past the last
+    # real entry, into the framed children) or stops short — an overrun either way.
+    if fmt_ver >= 8:
+        stored = _u16(data, payload + ENTRY_COUNT_OFF)
+        if stored != idx:
+            raise EndOfStream(
+                CT_NAME_TABLE, z, "preamble.entry_count",
+                f"preamble entry_count={stored} but {idx} inline entries are present "
+                f"(a track's name entry was added/removed without updating the count)")
     return idx
 
 
