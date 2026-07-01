@@ -4181,18 +4181,26 @@ def _fix_container_counts(data: bytes) -> bytes:
 
 
 def validate(data: bytes) -> "list[dict]":
-    """Catch a class of Pro Tools "end of stream" failures BEFORE writing, by replicating
-    PT's container read: report every count-prefixed container whose stored child count
-    does not match its actual children (which makes PT read past the container's bytes).
-    Returns a list of `{content_type, zmark, stored_count, actual_children}` ([] == clean).
+    """Catch Pro Tools "end of stream" failures BEFORE writing by replicating PT's
+    count-driven read of the objects our size-driven reader is too permissive about.
+    Returns a list of problem dicts ([] == clean).
 
-    `rc == 0` from the reader does NOT imply this passes — the reader walks by declared
-    size and tolerates a stale count; Pro Tools does not. Sound on every corpus session
-    (no false positives) and flags remove_track/duplicate_track outputs that skipped the
-    count update. This checks the count-container invariant only: a clean result is
-    necessary, not proven-sufficient, for PT validity."""
+    Two gates: (1) `eos_validator.simulate` walks the inline name-entry list (`0x2519`)
+    and the track container (`0x2624`) exactly as PT's stream reader does, catching a
+    misframed name entry or an over-large container count — the faults that make PT read
+    past an object's end; (2) the count-container invariant for the other count-prefixed
+    containers (`0x1015` track entries, `0x1054` lanes). `rc == 0` from the reader does
+    NOT imply this passes — the reader walks by declared size and tolerates the stale
+    inner counts; Pro Tools does not. Sound on every corpus session (no false positives)
+    and flags the pre-fix track edits. A clean result is necessary, not proven-sufficient,
+    for PT validity."""
+    from . import eos_validator as _EOS
+    blocks = _size_driven_blocks(data)
     out: "list[dict]" = []
-    for z, e, c in _size_driven_blocks(data):
+    eos = _EOS.simulate(data, blocks)                     # the ported PT stream walk
+    if eos is not None:
+        out.append(eos)
+    for z, e, c in blocks:                                # count-container invariant (0x1015/0x1054)
         if (c in _COUNT_CONTAINER_CHILD or c in _COUNT_CONTAINER_TOTAL) and z + 13 <= e \
                 and data[z + 13] == 0x5A:
             stored = int.from_bytes(data[z + 9 : z + 13], "little")
@@ -4258,8 +4266,11 @@ def remove_track(data: bytes, track_name: str) -> bytes:
                     seed_guids.update(guids_in(data[z:e]))
                 elif c == 0x1052:                       # a lane (with its placements)
                     ident.add(z)
-                elif c == 0x2519:                       # the length-prefixed name in the name table
-                    nt_ranges.append((j - 4, j + len(nb)))
+                elif c == 0x2519:                       # a whole inline name entry in the name table
+                    # entry = <len:u32><name><23-byte trailer> (0x2A marker inside);
+                    # removing only <len><name> leaves the trailer -> misframes the next
+                    # entry -> Pro Tools "end of stream". Splice the ENTIRE entry.
+                    nt_ranges.append((j - 4, j + len(nb) + _NAME_ENTRY_SUFFIX))
         pos = j + 1
     # link name -> track-list GUID -> the 0x102D that carries it -> its enclosing 0x261C subtree
     # (robust even when the track name isn't stored inside the detail subtree)
@@ -4387,8 +4398,10 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
                     seed.update(guids_in(data[z:e]))
                 elif c == 0x1052:
                     ident.add(z)
-                elif c == 0x2519:
-                    nt_ranges.append((j - 4, j + len(sb)))
+                elif c == 0x2519:                       # copy the WHOLE inline name entry
+                    # <len:u32><name><23-byte trailer>; copying only <len><name> inserts a
+                    # trailer-less entry -> misframes the list -> "end of stream".
+                    nt_ranges.append((j - 4, j + len(sb) + _NAME_ENTRY_SUFFIX))
         pos = j + 1
     for z, e, c in bl:
         if c == 0x102D and any(g in data[z:e] for g in seed):

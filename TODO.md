@@ -144,3 +144,18 @@ per-track subtrees); idempotent on all 26 corpus + round-trip preserved. NEW TOO
 NEXT: user to re-test the regenerated verify_2/verify_3 in PT; if still failing, hunt the next
 count-container / structural invariant (validate() is extensible — add the container type +
 its tallied child type). Broaden validate() beyond the 3 track containers as more are confirmed.
+
+## Track-edit EOS — the `0x2519` name-table fault FOUND + FIXED via a stream-walk validator (2026-07-01)
+
+The count fix (above) was necessary but NOT sufficient — PT still EOS'd. Built a count-driven
+stream-walk validator matching PT's read semantics in `ptxformatwriter/eos_validator.py` (clean, format-terms
+only). It reproduced the real fault: the `0x2519` name table's INLINE name-entry list (each entry
+`u32 len | name | 23-byte trailer` with a `0x2A` marker at trailer+6) was left MISFRAMED —
+`remove_track` deleted only `len|name` (orphaned the trailer), `duplicate_track` inserted a
+trailer-less copy. The block size + framed `0x251A` children were adjusted, so the size-driven
+reader passed (rc=0) but PT read past the object. FIXED: both edits now splice/insert the WHOLE
+entry (`+_NAME_ENTRY_SUFFIX`). `body_synth.validate()` now runs the ported `eos_validator.simulate`
+(name table + `0x2624` container) + the count check; sound 0/26 corpus, reproduces the pre-fix EOS,
+and both edits + round-trip are clean. PENDING: user re-tests the regenerated verify_2/verify_3 in
+PT (third time). The validator is a real oracle now; extend `eos_validator` with more object grammars
+(index records, per-track objects) as future edits need them.

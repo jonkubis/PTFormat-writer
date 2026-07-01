@@ -979,6 +979,16 @@ class ContainerCountValidatorTests(unittest.TestCase):
                 break
         self.assertTrue(any(p["content_type"] == 0x2624 for p in BS.validate(bytes(b))))
 
+    def test_catches_misframed_name_entry(self):
+        # the ported EOS walk: a bad name_length misframes the inline name-entry list
+        # (the exact 0x2519 fault the pre-fix track edits produced).
+        b = bytearray(self._base())
+        for z, _e, c in BS._size_driven_blocks(bytes(b)):
+            if c == 0x2519:                                  # first entry length @ payload+0x14 (v>=8)
+                b[z + 9 + 0x14 : z + 9 + 0x18] = (100000).to_bytes(4, "little")
+                break
+        self.assertTrue(any(p.get("content_type") == 0x2519 for p in BS.validate(bytes(b))))
+
 
 if __name__ == "__main__":
     unittest.main()

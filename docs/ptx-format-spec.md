@@ -670,9 +670,24 @@ draws); `ft1`/`ft2` are the source mtime FILETIME, `filesize` the referenced WAV
    (tallies `0x1014` track entries), `0x1054` (tallies `0x1052` lanes), and `0x2624` (tallies
    ALL per-track subtrees — `0x261c`/`0x261e`/`0x2621`/… — i.e. the total track count; the
    real `Hipsters bak.044→045` removal drops it 142→141). Any block-add/remove edit must
-   rewrite the affected counts. `body_synth.validate(data)` replicates this walk and reports
-   mismatches **before** writing (sound on all 26 corpus sessions); use it as a pre-write gate
-   in addition to Pro Tools itself.
+   rewrite the affected counts.
+7. **Keep the `0x2519` name table's INLINE entry list in sync.** The name table stores, before
+   its `0x5A`-framed children, a list of **inline name entries** — each `u32 name_length | name
+   bytes | 23-byte trailer`, with a `0x0000002A` (u32 = 42) marker at trailer offset +6 (the
+   first entry begins at payload `+0x14` for `format_version ≥ 8`, else `+0x16`). PT reads this
+   list entry-by-entry; if a track edit leaves it out of sync — deleting only `len|name` and
+   leaving the orphan trailer, or inserting a trailer-less entry — the next entry's
+   `name_length` lands on unrelated bytes, reads a huge value, and the walk overruns the object
+   → **"end of stream."** The block `size` and the framed `0x251A` name-detail children can be
+   perfectly adjusted (so a size-driven reader passes) while this inline list is broken —
+   confirmed as the exact `0x2519` fault on `remove_track`/`duplicate_track`. Splice/insert the
+   **whole** entry (`len | name | 23-byte trailer`), keeping every entry's `0x2A` marker aligned.
+
+`ptxformatwriter.eos_validator.simulate(data, blocks)` reproduces PT's count-driven read of the
+name table and track container and pinpoints the object/field that would overrun;
+`body_synth.validate(data)` runs it plus the count-container check as a **pre-write gate** (sound
+on all 26 corpus sessions — no false positives — and it reproduces the real EOS on the pre-fix
+edits). It is *necessary, not proven-sufficient*: a clean result plus Pro Tools itself is the bar.
 
 ---
 
