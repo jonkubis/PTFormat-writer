@@ -289,6 +289,19 @@ class MarkersTests(unittest.TestCase):
         for name in (b"Intro", b"Verse", b"Chorus"):
             self.assertIn(name, blk)
 
+    def test_markers_read_control(self) -> None:
+        """body_synth.markers reads the 4-marker control back exactly (name + tick), each
+        tick-locked (sample is None)."""
+        m = BS.markers(_load_path(_MARKERS))
+        self.assertEqual([(x["name"], x["tick"]) for x in m], self._CTRL_MARKERS)
+        self.assertTrue(all(x["sample"] is None for x in m))
+
+    def test_markers_read_roundtrip(self) -> None:
+        """set_markers then markers() round-trips arbitrary names/positions."""
+        ev = [("Intro", 0), ("Verse", 16 * _TQ), ("Chorus", 32 * _TQ)]
+        out = BS.set_markers(_load_path(_BASELINE), ev)
+        self.assertEqual([(x["name"], x["tick"]) for x in BS.markers(out)], ev)
+
 
 @unittest.skipUnless(_UNTITLED.exists() and _T140.exists() and _M34B2.exists()
                      and _BASELINE.exists() and _MARKERS.exists() and _CLEAN3.exists()

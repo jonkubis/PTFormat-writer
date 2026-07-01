@@ -511,17 +511,30 @@ record:
 Both recover PT-authored controls **exactly** (4/4→3/4 @bar2) and are sane across the corpus
 (up to 18 events). Each event also has a 16-byte entry in the `0x2719` trailing lane.
 
-### Markers (`0x2030` list / `0x2077` record) — **(PT-confirmed)**
+### Markers (`0x2030` list / `0x2077` record) — **(PT-confirmed, full read)**
 
 `0x2030` = `u32 count` + N × `0x2077`. Each `0x2077` marker record:
 
 | Record offset | Field |
 |---|---|
-| `+9` | ordinal |
+| `+9` | ordinal (`u8`) |
 | `+15` | name length (`u32`) |
 | `+19` | name bytes |
-| `name_end` and `name_end + 8` | position: `ZERO_TICKS + tick` as a 5-byte value (two copies) |
+| `name_end` and `name_end + 8` | position: a `u64` (two copies), timebase-encoded as §5d |
 | `name_end + 166` | 16-byte GUID |
+
+The position `u64` uses the **same timebase encoding as clips (§5d)**: top byte `0x40` =
+**tick**-locked (`tick = pos - 0x4000000000000000 - ZERO_TICKS`), `0x00` = **sample**-locked
+(`pos` is a plain sample count — a marker pinned to an audio hit; e.g. Bianca's "Intro" at
+~193 610 samples). The old "5-byte `ZERO_TICKS + tick`" note only held for tick-locked
+markers — a sample-locked one read that way lands at a large negative "tick".
+
+A session can carry a **duplicate `0x2030` list** (PT's memory-locations copy — THE WIND has
+two identical 21-marker lists, DWTS two 123-marker lists), so a reader must de-duplicate by
+`(name, position)`. `body_synth.markers(data)` returns
+`[{"name", "tick", "sample"}, …]` (one of tick/sample set per timebase), deduped, in list
+order; `session_info` reports the deduped `n_markers`. Recovers PT-authored controls exactly
+and is sane across the corpus (0..123 markers, mixed tick/sample on Bianca/COGNAC).
 
 ---
 

@@ -3575,6 +3575,39 @@ def meter_map(data: bytes) -> "list[tuple[int, int, int]]":
     return []
 
 
+def markers(data: bytes) -> "list[dict]":
+    """Every session marker as `{"name": str, "tick": int|None, "sample": int|None}`.
+
+    Each marker is a `0x2077` record (nested in a `0x2030` list): ordinal `u8` @+9, name
+    length-prefixed (`u32` len @+15, bytes @+19), and a `u64` position at `name_end`
+    (= 19 + namelen) with the SAME timebase encoding as clips (§5d) -- top byte `0x40` =
+    tick-locked (`tick = pos - 0x4000000000000000 - ZERO_TICKS`), `0x00` = sample-locked
+    (`sample = pos`, e.g. a marker dropped at an audio hit). A session can carry a duplicate
+    `0x2030` list (PT's memory-locations copy), so records are de-duplicated by `(name,
+    position)`; results are in file (list) order. Recovers PT-authored controls exactly and
+    is sane across the corpus (marker counts 0..123, mixed tick/sample on some sessions)."""
+    out: "list[dict]" = []
+    seen: "set[tuple[str, int]]" = set()
+    for z, _e, c in _size_driven_blocks(data):
+        if c != 0x2077:
+            continue
+        nl = int.from_bytes(data[z + 15 : z + 19], "little")
+        ne = z + 19 + nl
+        if nl > 256 or ne + 8 > len(data):
+            continue
+        name = data[z + 19 : ne].decode("latin1", "replace")
+        pos = int.from_bytes(data[ne : ne + 8], "little")
+        if (name, pos) in seen:
+            continue
+        seen.add((name, pos))
+        if pos >> 56 == 0x40:
+            out.append({"name": name, "tick": pos - 0x4000000000000000 - _ZERO_TICKS,
+                        "sample": None})
+        else:
+            out.append({"name": name, "tick": None, "sample": pos})
+    return out
+
+
 def _lane_track_name(data: bytes, lane_zmark: int, lane_end: int) -> str:
     """Track/lane name: the length-prefixed string in the lane head (`<u32 len><len
     bytes>`). Read the exact length -- a greedy printable scan would swallow the
@@ -3805,7 +3838,7 @@ def session_info(data: bytes) -> dict:
         "n_tracks": ctc.get(0x261B, 0),          # one 0x261B per track of any type
         "n_clips": ctc.get(0x1050, 0),
         "n_regions": ctc.get(0x2628, 0),
-        "n_markers": ctc.get(0x2077, 0),
+        "n_markers": len(markers(data)),         # deduped (a 2nd 0x2030 copy can exist)
         "n_tempo_events": len(tempo_map(data)),
         "n_meter_events": len(meter_map(data)),
         "clip_lanes": [(name, k) for _z, name, k in clip_lanes(data)],
