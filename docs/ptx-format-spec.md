@@ -1196,3 +1196,429 @@ All offsets below are payload-relative (= zmark + 9), i.e. relative to the first
   - (none) — zero payload; presence is the only information carried.
 - **notes:** Its existence as a direct child signals that a per-parent feature is on. Appears as EXACTLY ONE direct child per parent instance across the whole 0x2038–0x203e playlist/view/edit parent family. Observed parents: 0x2038 (9837), 0x203b (3438), 0x203a (181), 0x203e (113), 0x203d (80), 0x203c (63), 0x2039 (3). NOT the single most common block type (ranks 10th in the 19-session scope). The one-per-parent rule is universal, not 0x203a-specific.
 - **confidence:** high.
+
+### Additional types — tiers 31–60 by frequency
+
+### 0x2066 — Ruler/grid position-label cache
+
+- **Kind:** LEAF (no 0x5A children, confirmed 69/69). Inner block_type u16@z+1 always 0x0002 (69/69). Parent is deterministic by group count G: G=1 → parent 0x2588 (26/26); G=2 → parent 0x2581 (17/17); G=3 → top-level/no enclosing 0x5A block (26/26). The proposed "always co-located with a sibling 0x2056" is FALSE (a 0x2056 sits within ±4 blocks only 36/55; the rest are preceded by 0x2011 or 0x2595).
+- **Size:** Variable, driven by group count G. Exactly three sizes: declared u32 size 111 (G=1), 200 (G=2), 289 (G=3); total span = declared_size + 8 (119/208/297 bytes incl. the 9-byte 5A header), verified 55/55. Per session there is always a G=1 and a G=3 instance; the G=2 (0x2581-parented) instance appears in only 17/26 sessions. 55 instances / 19 sessions (excl. huge "Hipsters" set); 69 / 26 including it.
+- **Fields (payload-relative, offset 0 = z+9):**
+  - `+0 u32 G` = number of position groups (observed 1..3); verified G == #groups 69/69.
+  - `+4, 3*(G+4)` preamble = EXACTLY 3 records, each = `[G flag bytes][u32 == G]`. The trailing u32 of every record equals G (55/55). The G flag bytes carry small enum/bool values (observed 0x00/0x01/0x04); per-group view/selection flags that vary across instances. Preamble length is fixed at 3*(G+4) = 15/18/21.
+  - Then G groups, each = `[u32 count == 5 (110/110)][5 length-prefixed ASCII strings]`. The 5 strings are independent per-timebase renderings (see notes), NOT one shared instant. Fixed slot widths: slot0=12 (Bars|Beats|Ticks), slot1=10 (Min:Sec), slot2=14 (Timecode), slot3=11 (Feet+Frames), slot4=11 (Samples). All 110 groups matched.
+  - Tail (after last group) = `[u32 == G][G u32 words alternating 0xffffffff, 0x00000000, ... starting with 0xffffffff]`. Exact forms: G=1 → `01000000 ffffffff`; G=2 → `02000000 ffffffff 00000000`; G=3 → `03000000 ffffffff 00000000 ffffffff` (55/55). One word per group — a per-group −1/0 flag/selection-mask array.
+- **Notes:** Role is a display/view-state cache of pre-rendered ASCII position labels, each timeline value rendered in all 5 PT timebases (Bars|Beats|Ticks, Min:Sec, Timecode, Feet+Frames, Samples). PT recomputes it from the current edit/ruler view + session tempo/format — NOT authoritative session data (string values vary session-to-session). The 5 slots in a group demonstrably diverge (e.g. Samples='960000' = 20s@48k but Min:Sec='0:05.000'), so each slot is an independent per-timebase value; the 3 groups read like small/default/large grid increments. PARSING NOTE: `_raw_block_bounds` returns e = z+7+size, overshooting by one — true last content byte is z+6+size; ignore the single artifact byte the bounds sweep appends when reading the tail. Full schema validated 69/69 (incl. 14 Hipsters instances), byte-exact in ≥2 sessions per claim (DWTS, Quality Time, Reverse Rewire, DOPE).
+- **Confidence:** high.
+
+### 0x2056 — Per-view display/zoom-state record
+
+- **Kind:** LEAF (0 children, all 55). block_type = 6. Parent distribution: top-level/ROOT 19×, 0x2588 19×, 0x2581 17×. Every non-root parent (36/36) also contains a 0x2066 sibling; 0x2552 and 0x258c also co-occur under those parents (19× each).
+- **Size:** Fixed. size field = 43 (0x2B) → 41-byte payload, 50-byte total block span (9-byte header `5A 06 00 2B 00 00 00 56 20` + 41 payload). 55 instances / 19 sessions.
+- **Fields (payload-relative, payload starts at z+9):**
+  - `+0 u32 flag A`: 0 or 1. INVARIANT: = 0 whenever parent==0x2588 (19/19); = 1 otherwise EXCEPT one all-zeros-prefix outlier under 0x2581 (35× = 1, 1× = 0).
+  - `+4 u32 = 0` (const, all 55).
+  - `+8 u32 field B`: {0:1, 256:19, 1024:35} — small view enum.
+  - `+12 u32 field C`: {512:28, 768:1, 1024:26}.
+  - `+16 u32 field D`: {256:10, 768:45}.
+  - `+20 u32 = 0` (const, all 55).
+  - `+24 u32 field E`: {0:50, 256:2, 768:3} — mostly 0.
+  - `+28 u32 packed flags`: byte28=0 (const); byte29 ∈ {0,1} (0:22/1:33); byte30 ∈ {0,1} (0:39/1:16); byte31 ∈ {2,3} (2:51/3:4). Observed values {0x02000000, 0x02000100, 0x02010100, 0x03010000}. Middle-flag semantics inferred, not proven.
+  - `+32 u32 field F`: exactly {0x01000000:45, 0x08000000:10}, i.e. byte35 ∈ {1,8} (bytes 32–34=0). byte35 always 1 when parent==0x2588.
+  - `+36 u8 = 0`; `+37 u8 = 0`; `+38 u8 = 0` (const).
+  - `+39 u8 view value`: {80,96,100}. INVARIANT: = 100 whenever parent==0x2588 (19/19, no violations); = 80 or 96 otherwise. Plausibly a default track/lane height or zoom preset (inferred, not proven).
+  - `+40 u8 = 0` (const, all 55).
+- **Notes:** PT-recomputed per-view display/zoom state (one per view container alongside the 0x2066 position cache; 19 at top level). The trailing view value (80/96/100) looks like a default track/lane height or zoom preset. Treat as opaque/copyable — do not hand-author. **LOW-CONFIDENCE:** the SEMANTICS of fields B/C/D/E, the middle packed flags, and byte39 (height vs zoom) are INFERRED from value ranges, not proven; the const-0 fields and value distributions ARE proven. The sibling-0x2066 claim holds only for the 36 non-root instances (top-level instances have no container/sibling).
+- **Confidence:** medium.
+
+### 0x2070 — Default/template view-settings blob
+
+- **Kind:** LEAF (no children; first-child scan None for all 57/57). block_type u16@z+1 == 1. Appears exactly 3× per session, one under each of parents 0x2074, 0x2071, 0x2072. The 0x2074 parent is nested under 0x206a (19/19); the 0x2071 and 0x2072 parents are top-level (19/19 each). 57 instances / 19 sessions (Hipsters excluded).
+- **Size:** Fixed block span = 172 bytes (e−z); size-field u32@z+3 == 165; payload = 163 bytes (payload_len = size − 2, because content_type u16@z+7 is inside the size-counted region: span=[z, z+7+size], payload=[z+9, z+7+size]). 165 is the size field, NOT the payload length. Single size across all 57.
+- **Fields (payload-relative, offset 0 = z+9):**
+  - `+0 u8 discriminator`: 0x00 when parent==0x2074, 0x02 when parent==0x2071 or 0x2072. The ONLY payload byte that ever varies (57/57, exact parent correlation {(0x2074,0x00):19, (0x2071,0x02):19, (0x2072,0x02):19}). payload[1] and payload[2] always 0x00, so could equally be read as the low byte of a u16/u32.
+  - `+1, 162 bytes` CONSTANT template (payload offsets 1..162; byte-identical across all 57). Complete non-zero map (offset=value): [3]=01 [4]=01 [7]=08 [19]=08 [23]=01 [24]=02 [25]=04 [26]=40 [27]=07 [28]=0a [29]=05 [30]=41 [31]=80 [36]=01 [37]=01 [39]=01 [40]=01 [42]=01 [45]=01 [99]=01 [100]=01; every other offset is 0x00.
+  - `+3, 6 bytes` fixed sub-field = `01 01 00 00 08 00` (payload[3..8], inclusive).
+  - `+23, 9 bytes` fixed "default-settings signature" = `01 02 04 40 07 0a 05 41 80` (payload[23..31]; NOT [24..32] — the proposed window was shifted +1).
+  - `+99, 2 bytes` = `01 01` (payload[99..100]); with trailing zeros payload[99..102] = `01 01 00 00`.
+- **Notes:** Pure PT-recomputed default view state; treat as opaque. Fixed constant across the entire corpus except payload byte 0 (a parent-derived discriminator). Nothing in the corpus (single 0x00 variant, single 0x02 variant) lets us decode the interior fields into meaningful semantics — interior offsets are reported as observed constants, not a decoded schema.
+- **Confidence:** high.
+
+### 0x252c — Built-in Click II plugin "Complete Controls State" snapshot
+
+- **Kind:** LEAF (no children); parent ALWAYS 0x200b (434/434, rigorous innermost-enclosing nesting). Each 0x200b holds exactly one 0x252c plus one 0x200a name block (1:1, never shared). Full ancestor chain (inner→outer): 0x200b → 0x261c → 0x2624.
+- **Size:** size field u32@z+3 = 95, 106, or 107 (counts 61 / 45 / 328); payload = size − 2 = 93 / 104 / 105. 434 instances / 12 sessions. NOTE: size does NOT cleanly map to "long" vs "inline" form — the 45 size-106 blocks split into 38 long-form and only 7 inline-name-form. All 61 size-95 are the Rhythmic-Click shorter form; all 328 size-107 are Poly-Click long form.
+- **Fields (payload-relative):**
+  - `+0 char[12]` plugin type-id, stored with each 4-byte group byte-swapped. VERIFIED: swap4('igiDPleFyloP')='DigiFelPPoly', swap4('igiDRleFtyhR')='DigiFelRRhyt' — the byte-swapped FIRST 12 chars of the name ONLY (NOT the full 16-char name; the full name appears separately as ASCII at +24). 2 values: Poly Click (373 inst) / Rhythmic Click (61 inst).
+  - `+12 u32-LE A` = inner blob length: 0x58=88 (Poly), 0x4c=76 (Rhythmic). Constant per plugin type (434/434).
+  - `+16 u32-BE B` = the SAME value as A but big-endian (byte-swapped mirror of A). A(LE)==B(BE) verified 434/434.
+  - `+20 u32 form discriminant` (NOT a plain −1 sentinel): 0xffffffff → long "Complete Controls State" form (427/434); 0x01000000 → compact inline-name form (7/434, all in the 7 Reverse Rewire sessions). Does NOT correlate with block size (both forms occur at size=106).
+  - `+24 char[16]` ASCII plugin name 'DigiFelPPolyelck' or 'DigiFelRRhytelck' (offset ALWAYS 24, 434/434; NOT length-prefixed). LONG form: followed at +40 by ASCII 'Complete Controls State\0'. INLINE form (the 7 blocks): followed by a small numeric header.
+  - `+72, 4 bytes` constant marker 0x01010101 immediately before the first control token (434/434).
+  - `+76, 6 bytes` ASCII control token 'd_c001' (fixed offset 76, 434/434). Followed by 2 pad bytes (00 00) then an 8-byte control-value blob at +84.
+  - `+84, 8 bytes` control-value blob for d_c001. CONSTANT per plugin type: Poly = `3f a4 7a e1 47 c5 a1 ca` (373/373), Rhythmic = `3f df ff ff ff e1 47 af` (61/61). f32/f64 interpretation UNCONFIRMED/speculative; bytes never vary within a plugin type.
+  - `+92, 6 bytes` ASCII control token 'l_c002' — present ONLY in the Poly Click forms (373/373 at fixed offset 92); ABSENT in the 61 Rhythmic blocks (hence the shorter 93-byte payload). Followed by a trailing all-zero blob.
+- **Notes:** A CANNED plugin-defaults blob, NOT per-instance automation: only 4 distinct payloads exist corpus-wide (3 serialization forms of Poly Click + 1 Rhythmic Click); control-value bytes are byte-for-byte identical across all 373 Poly / all 61 Rhythmic instances. Always attached to the plugin/insert container 0x200b as a leaf sibling of a 0x200a name block. This is PT's built-in-Click default control state — do NOT over-claim a precise per-parameter schema; d_c001/l_c002 are FIXED-offset tokens with constant values, not per-instance parameters.
+- **Confidence:** high.
+
+### 0x2638 — Per-path signal-format sub-record
+
+- **Kind:** LEAF (0 immediate children, 173/173). block_type u16@z+1 = 1. Parent is 0x2602 in 171/173 cases and 0x1021 in 2/173 (two strays). Each 0x2602 that has a 0x2638 holds exactly one 0x2601 + one 0x2638; most 0x2602 nodes (and ALL nodes in the other 16 sessions) have only a 0x2601 child. Grandparent verified 0x2603 (the single I/O path list) 100%.
+- **Size:** Fixed: size u32@z+3 = 31; total span end−zmark = 38 bytes; payload (z+9..end) = 29 bytes. All verified 173/173. 173 instances across only 3 of 19 sessions.
+- **Fields (payload-relative):**
+  - `+0 u32 path format-class ordinal` (values 1,2,3,4,5,6,9,10,13,19; hi 3 bytes @1..3 always 0). NOT a free-running index — tightly correlated with the width field @16: ord 1..6 → byte17=8, ord 9..10 → byte17=16, ord 13/19 → byte17=24 (173/173). One 0x2638 per path.
+  - `+4 u32 = 2` (const, 173/173).
+  - `+8 u8 = 0` (const, 173/173).
+  - `+9 u32 = 1` (const, 173/173).
+  - `+13 u32 = 1` (const, 173/173).
+  - `+16 u32 width/bit-depth field` = 0x800/0x1000/0x1800 i.e. exactly 256*byte17 with byte17 ∈ {8,16,24} — 159/9/5 split. byte16,18,19 always 0. Likely a channel/bit-width descriptor.
+  - `+20 u32 small enum/flag` = 0/256/512/768 i.e. 256*byte21 with byte21 ∈ {0,1,2,3} — 92/54/12/15 split. byte20,22,23 always 0. (Raw u32 is 0/256/512/768, NOT 0/1/2/3; 0/1/2/3 is byte[21] only.)
+  - `+24, 5 bytes = 0` (const, 173/173).
+- **Notes:** A format/width descriptor for an I/O routing endpoint, part of the recomputable I/O-setup graph. Sits under an I/O path definition (0x2602) alongside that path's single 0x2601 child; the 2 strays sit directly under a 0x1021 bus/path node (whose payload carries the ASCII bus name, e.g. "BACKING TRACKS"). IMPORTANT: 0x2638 is NOT emitted just because the path list is populated — every corpus session has a full 0x2603 path list (132–312 nodes), yet only 3 sessions contain any 0x2638, and even there it attaches to only a subset of paths; the real trigger (PT version? specific bus/format config?) is unknown. The lpstr path-name + 0x2A GUID live in the PARENT node but NOT at parent-payload offset 0. **MEDIUM-CONFIDENCE:** schema/offsets/consts are HIGH (173/173 byte-exact); the SEMANTIC labels for @0 (format class), @16 (width), @20 (enum) are context-inferred, not independently proven.
+- **Confidence:** medium.
+
+### 0x2425 — Media/file cross-reference record
+
+- **Kind:** LEAF (no 0x5A children; 39/39). Parent ALWAYS 0x2426 (39/39). 39 instances across 11 corpus files, but only ~5 DISTINCT session-contents (DWTS SHOW/__001/__002 are byte-identical; the 7 Reverse Rewire backups collapse to 2 distinct signatures).
+- **Size:** Variable: 110/115/144/145/150/161/176/800 bytes (span = [z, z+7+size]). Fully determined by N (index count) and path string lengths: payload = 4 + 5*N + 4 + Σ(4+len_i over path components) + 4 + 6. All 39 close EXACTLY (zero slack). The 800-byte instances are just the largest N (=142), not a special "hybrid" shape.
+- **Fields (payload-relative):**
+  - `+0 u32 N` = index-entry count (≥1 in ALL 39; NOT a "kind (1 or 2)" field — that was N misread. No separate header before N, no opaque leftover u32s).
+  - `+4, 5*N` index list: N entries, each 5 bytes = `<u8 tag=0><u32 item_index LE>`. Tags all 0 (39/39). Indices strictly monotone +1 within each block. Stride is tag-THEN-index (`00 XX XX XX XX`); the alternate `<u32 idx><u8 pad>` reading yields non-monotone garbage and is WRONG.
+  - `+(4+5*N) u32 path_count` = number of path components. Observed 3, 4, AND 6 — NOT fixed at 3. True path depth (drive / folder chain / '<file>.ptx').
+  - Then `path_count` length-prefixed ASCII components: each = u32 len (LE) + len bytes. comp[0]=volume ('MAC BOOK BU','Studio 1 Audio','Arts T1 SSD'), middle=folder chain, last=leaf filename ('...ptx').
+  - Immediately after the last component: `u32 volume identifier` — NOT a per-file checksum. CONSTANT PER VOLUME: `50 5D 4D C8` → 'MAC BOOK BU', `88 42 74 CB` → 'Studio 1 Audio', `19 E6 18 D2` → 'Arts T1 SSD'. Different files on the same volume share the same 4 bytes.
+  - Final `6 bytes` of 0x00 padding ending the block (all 39). Trailer is 10 bytes total = `<u32 volume_id><6× 00>`, with the volume id at the START.
+- **Notes:** Media/file cross-reference under the 0x2426 container: each instance binds a contiguous run of global "referenced item" indices to a single on-disk file location (volume + folder chain + filename). ALL 39 carry BOTH an index list AND a filesystem path — they are NOT two co-existing shapes (path-only vs idxlist-only). Within a session the per-instance index ranges are contiguous, start at 0, and partition ONE global 0..M item-index space (e.g. DWTS: 0-14,15-29,30-171,172-313,314-328,329-343,344-361) — strongest evidence for the "referenced item indices" semantics. Genuinely undecoded: the SEMANTIC target of the global item indices (which table they index into) and the exact derivation of the per-volume 4-byte id.
+- **Confidence:** high.
+
+### 0x1041 — Groove-template descriptor
+
+- **Kind:** CONTAINER. Parent ALWAYS 0x1040; ALWAYS exactly one immediate child, ALWAYS 0x1042 (child-count {1:38}). Frame block_type @z+1 = 0x0002; content_type @z+7 = 0x1041 (all 38).
+- **Size:** Block SPAN = 104 bytes for the built-in default (declared size field @z+3 = 97; payload = span − 9 = 95); span = size_field + 7. Real imported grooves grow: Bianca's 'MPC 65% 16th Swing' is span 869 / size-field 862 / payload 860. Growth is entirely in the 0x1042 grid child (which for the custom groove holds 9× 0x1043 grid-point sub-blocks; the built-in 0x1042 is span 47 with no children). The 0x1041 header itself is fixed-length up to the name.
+- **Fields (payload-relative):**
+  - `+0 u16 flags` = 0x0000 in 34/38, 0x0100 in 4 (COGNAC ×2 + THE WIND ×2, NOT "the COGNAC set"). Semantics unpinned (display/preview-style bit) — only 4 samples.
+  - `+2 u16 = 1` (const; likely an enabled/present flag).
+  - `+4 u8 = 0` (const).
+  - `+5 u16 = 100 (0x64)` (const, all 38). DOWNGRADED: NOT the per-template timing/quantize strength — stays 100 even for the 'MPC 65% 16th Swing' groove (whose 65% swing lives as tick deltas in 0x1042/0x1043). Best read as a fixed/default global apply-strength value, semantics unconfirmed.
+  - `+7 u16 = 100 (0x64)` (const, all 38). Same downgrade as +5 (proposed 'velocity strength percent' unconfirmed — never varies).
+  - `+9 u16 = 100 (0x64)` (const, all 38). Same downgrade as +5 (proposed 'duration strength percent' unconfirmed — never varies).
+  - `+11 u16 = 0` (const).
+  - `+13 u32 name_len`, then name_len ASCII bytes (length-prefixed string). 37× '<groove saved with session>' (len 27); 1× 'MPC 65% 16th Swing' (len 18).
+  - `+17+name_len`: the inline 0x1042 grid sub-block begins (frame magic 0x5A, block_type 0x0001, content_type 0x1042) — the sole child in all 38.
+- **Notes:** One appears per saved groove/quantize template in the session's groove-template table (parent 0x1040). Every corpus session with grooves carries exactly two 0x1041, and in 37/38 both are the built-in placeholder named '<groove saved with session>' (identical name in both slots — NOT two differently-named defaults). A user-imported groove replaces one slot with a real template (only corpus example: Bianca). The actual grid lives entirely in the single 0x1042 child (and its 0x1043 grid-point children). **MEDIUM-TO-LOW-CONFIDENCE on semantics** of +5/+7/+9 (invariant 100/100/100, never observed to vary) and the +0 flag meaning (4 samples).
+- **Confidence:** high for structure; medium-to-low for the semantics of +5/+7/+9 and the +0 flag.
+
+### 0x1042 — Groove-template grid data
+
+- **Kind:** LEAF for empty-slot stubs (0/38 have enumerated children); CONTAINER for a populated custom groove (inline 0x1043 children). Parent is 0x1041 (38/38); grandparent 0x1040 (37/37 stub instances checked). block_type u16@z+1 = 1 (all 38).
+- **Size:** Stub: size-field u32@z+3 = 40, span (z→e) = 47, payload = 38 (37/38 instances, byte-identical across 19 sessions). '40' is the size field, NOT the span. The one custom groove (Bianca Long Road): size=814, span=821, payload=812.
+- **Fields (payload-relative):**
+  - `+0 u8=0x04, +1 u8=0x04` — constant '04 04' prefix (both stub and custom; also mirrors the '04 04' in the parent 0x1041). Semantic (grid-resolution/quantize enum) UNCONFIRMED — only the constant bytes are verified.
+  - `+2 u16 = 100 (0x0064)` (37/37 stub; custom also 100).
+  - `+4 u16 = 0` — 37/37 STUB instances ONLY. NOT universal: the custom groove has 100 (0x0064) here, so '+4=0' is a stub-only constant.
+  - `+6 u16 = 100 (0x0064)` (37/37 stub; custom also 100).
+  - `+8 u8 = 1` (37/37 stub; custom also 1, then continues +9 = `01 00 01 00 ...`).
+  - `+9..+37 (stub)`: 29 zero bytes. Full stub payload byte-identical across all 37: `04 04 64 00 00 00 64 00 01` + 29× `00`.
+  - CUSTOM groove body (single example, provisional): after a 30-byte fixed header (`04 04`, then `64 00 64 00 64 00`, `01 00 01 00 01 00`, `00`, then u32=15000 (0x00003a98), then a small fixed run) comes a length-prefixed ASCII description string (u32 len=43, 'MPC 65% Swing. Fixed Velocity. No Duration.'), then a u32 = record count (17), then 17 inline 0x1043 grid-point sub-blocks.
+  - 0x1043 grid-point record (each size-field=36, payload=34): 4× u64 + u16 tail = 32+2 = 34 bytes. u64_0=start tick, u64_1=end tick (== next record's start; contiguous grid), u64_2=reference/quantized tick, u64_3=constant 120000 (0x1d4c0, one PPQ bar), then u16 tail ALTERNATING 0x005a/0x005b across the 17 records (a flag/rounding bit, NOT a fixed 0x005b). The proposed '3× u64 + u16 tail' undercounts by one u64.
+- **Notes:** The single required child of 0x1041 (a groove-quantize template slot). Every session carries a fixed 2-slot groove list (2× 0x1041 → 2× 0x1042), grandparent 0x1040. For an EMPTY/unused slot (parent 0x1041 named '<groove saved with session>') it is a fixed 38-byte-payload stub; for a real IMPORTED groove it expands into header + description string + u32 record-count + inline 0x1043 grid-points. The two instances are groove-list SLOTS, and stubs are EMPTY slots — NOT 'built-in default grooves'. **HIGH for the empty stub** (37/37 byte-identical); **MEDIUM-LOW for the custom-groove internals and the 0x1043 record schema** — only ONE custom instance exists (Bianca Long Road), so those details are inferred from a single example and are provisional. The '04 04' prefix and the u16 percents are UNCONFIRMED (could be view/quantize state PT recomputes).
+- **Confidence:** high for the empty-slot stub; medium-low for the custom-groove internals / 0x1043 record schema (single example).
+
+### 0x1055 — Audio-region catalog list-header
+
+- **Kind:** Count+list header. Populated → CONTAINER whose inline children are 0x1053 (audio-region records; each 0x1053 in turn contains 0x1051/0x104f clip/anchor sub-records). Empty → LEAF (payload is just the 4-byte zero count). The TOPLEVEL catalog has NO enumerated parent (all 19 sessions); the always-empty stub's immediate parent is a single 0x2430 (which itself has no enumerated parent). CAVEAT: "parent" here means the immediate enclosing block in the size-driven enumeration; PT's true logical region/track container is not emitted as a spanning block, so neither 0x1055 is inside a per-track block.
+- **Size:** Empty: span 14, size u32@z+3 = 6, payload 4 bytes (just the zero count) — 37/38 instances. Populated: span 462, size 454 — 1 instance (MANOLITO SIMONET), count=1, holding one inline 0x1053. NOTE the frame reports span = size + 8 and includes the following block's leading 0x5A in its end bound; the proposed '13 span'/'461 span' figures are off by one.
+- **Fields (payload-relative):**
+  - `+0 u32 count` = number of inline 0x1053 audio-region records that follow. VERIFIED count == #enumerated inline 0x1053 children (1==1 populated, 0==0 in all 37 empty). The ONLY field of the empty stub.
+  - `+4..` : `count` inline 0x1053 region records (each a `5A..53 10..` block). Observed body (single example, MANOLITO region 'C0004_1'): length-prefixed name at 0x1053 payload+0 (u32 len=7, then 7 ASCII 'C0004_1'), then a u32 (0x00000008), then inline sub-blocks — pairs of 0x1051 and 0x104f (8 pairs here) carrying the clip/anchor entries. The 0x1053/0x1051/0x104f schema is summarized only.
+- **Notes:** Appears EXACTLY TWICE per session (NOT per-track — count fixed at 2 regardless of track count) with two distinct duties: (a) a single session-level TOPLEVEL audio-region catalog (populated when the session has saved audio regions, empty otherwise); (b) a single always-empty count=0 stub nested inside one lone 0x2430 wrapper, sitting next to the 0x1058 MIDI-region-catalog analog. Instance tally: 38 = 19 TOPLEVEL (18 empty + 1 populated) + 19 always-empty 0x2430-wrapped. This is real saved-region catalog data, NOT PT-recomputed view state. **HIGH for the header itself** (count == inline-child count; all 37 empty stubs are '00 00 00 00'); **MEDIUM-LOW for the 0x1053 record body** — only ONE populated catalog exists in the loadable corpus (MANOLITO), so it rests on a single example. The 0x2430 stub's exact purpose is not established. 0x2430 wrapper full bytes: `5a 01 00 0f 00 00 00 30 24 5a 01 00 06 00 00 00 55 10 00 00 00 00`.
+- **Confidence:** high for the header; medium-low for the 0x1053 record body.
+
+### 0x1058 — MIDI-region / clip catalog list-header
+
+- **Kind:** Count+list header; block_type u16@z+1 == 1 (all 38). Populated top-level catalog → CONTAINER whose immediate children are all 0x1057 (MIDI-region records). Empty → LEAF. Parents: (1) 0x242e for the one always-empty stub per session (the 0x242e wrapper contains ONLY the 0x1058 as its sole immediate child — NOT a 0x1055/0x2424/0x2426 cluster); (2) top-level / parent=None for the session catalog (both empty and populated forms). The top-level catalog is preceded by 0x2634 when empty and by 0x2628 when populated — a perfect discriminator (9/9 empty→0x2634, 10/10 populated→0x2628).
+- **Size:** 13 bytes span (size u32@z+3 == 6; payload 4 bytes = '00 00 00 00') for every empty instance (28/38: 19 wrapped in 0x242e + 9 top-level empty catalogs). Populated top-level catalogs scale: span 359 (1 region), 1655 (6), 1721 (6), 13709 (13) — 10 populated instances, 1..13 regions.
+- **Fields (payload-relative, +0 = z+9):**
+  - `+0 u32 count` = number of inline 0x1057 region records. VERIFIED count == immediate-child 0x1057 count == any-nested 0x1057 count in ALL 10 populated (6→6, 13→13, 1→1) and == 0 with payload '00 00 00 00' in all 28 empty.
+  - `+4..` : `count` MIDI-region records, each an inline `5A`/block_type=3/content_type=0x1057 block. Each 0x1057 payload BEGINS at its own +0 with a length-prefixed ASCII region name (u32 len + len bytes), e.g. `0c 00 00 00` 'Drums 1 midi', `11 00 00 00` 'Drums 1 midi.dup1', 'Inst 2.01', 'MIDI 1'. All 62 0x1057 children parse a valid length-prefixed name at +0. Note/anchor sub-structure inside each 0x1057 was NOT decoded (out of scope for the 0x1058 header).
+- **Notes:** The MIDI analog of the audio 0x1055. Appears exactly twice per session: (a) one 0x242e-wrapped ALWAYS-EMPTY stub (session-level fixture, count=0 — NOT per-track); (b) one top-level SESSION-LEVEL catalog, EMPTY when no MIDI regions and POPULATED (inline 0x1057) when there are. The populated catalog is the SAME top-level block as the empty top-level stub, just filled in — not a separate role. The empty stub shape is uniform: `5a 01 00 06 00 00 00 58 10 00 00 00 00`. **HIGH** on every header field (invariant across 38 instances / 19 sessions; count==child-count in all 10 populated; preceding-block discriminator 19/19); **MEDIUM** only on the child 0x1057 internal note/anchor schema, which was not decoded.
+- **Confidence:** high (header); medium (child 0x1057 internals).
+
+### 0x258c — Ordered visibility/state index
+
+- **Kind:** LEAF (no children — 0/44 instances; header block_type u16@z+1 == 0x0001 for all 44). Immediate PARENT is one of exactly two view-descriptor flavors: 0x2553 (25 instances) or 0x2588 (19 instances). Ancestor chains (inner→outer): 0x2588 → 0x2597 (always, 19/19); 0x2553 → 0x258b → 0x2016 (9), or 0x2553 → {0x258b|0x2551} → 0x2551/0x2587 (16).
+- **Size:** Variable. The DECLARED u32 size FIELD (@z+3) ∈ {6, 18, 33, 36, 39}; the total block SPAN (= 7 + size_field) ∈ {13, 25, 40, 43, 46}. Payload = size_field − 2 = 4 + 3*count. Formulas: size_field = 6 + 3*count; span = 13 + 3*count. Observed counts: 0 (empty), 4, 9, 10, 11. count=0 (empty) occurs only under 0x2553 (8×); under 0x2588 count is invariantly 4.
+- **Fields (payload-relative):**
+  - `+0 u32 count` = number of records (LE).
+  - `+4 + 3*i` (i in 0..count−1): one record = `{ u16 item_id (LE), u8 flag }`; records are contiguous and exactly consume the payload (4 + 3*count == payload_len for all 44, 0 leftover).
+  - `item_id`: an ordinal referencing a column/group/slot. Under 0x2553 the ordered id run is a stable prefix: 50, 8, [51 only when count==11], 1,2,3,4,5,6,7, [9 only when count>=10] (observed sequences (50,8,51,1..7,9)×11, (50,8,1..7,9)×4, (50,8,1..7)×2, ()×8). Under 0x2588 the sequence is INVARIANT: ids 43,46,44,48 in that order.
+  - `flag`: u8. Under 0x2553 it genuinely toggles per record (both 0 and 1 observed: 32 zeros / 147 ones; two 0x2553 instances differing ONLY in flags found → independent per-record state, likely shown/hidden). Under 0x2588 the flag is a CONSTANT 1 across all 76 records in all 19 instances — no variation, so its 'toggle' meaning is unverified for that flavor.
+- **Notes:** A length-counted list of (item_id, flag) records recording, in display order, a set of column/group/item slots and a per-slot on/off byte. View/display state (recomputable UI layout), not primary session data — the leaf's block_type is always 0x0001 and it never contains children. NOTE: "PT recomputes it" is INFERRED from structure/placement, not directly proven. Record order IS meaningful (stable, not sorted). The two parent flavors reuse 0x258c for different, disjoint view lists. **HIGH** on the structural schema and the 'payload_len == 4 + 3*count, 0 leftover' invariant (all 44 / 19 sessions, hand-verified in DOPE, DWTS, Bianca, MANOLITO), and on LEAF-under-exactly-0x2553/0x2588 with disjoint id sets; **MEDIUM** on flag semantics (independent 0/1 toggle demonstrated only for 0x2553; constant 1 under 0x2588); **LOW-MEDIUM** on the precise UI meaning of item_id.
+- **Confidence:** high on structure; medium on flag semantics; low-medium on item_id UI meaning.
+
+### 0x207a — Per-view/window layout record
+
+- **Kind:** LEAF (0 children, all 37). Parent ALWAYS 0x2031, but NOT one-per-container: a single 0x2031 holds ALL the session's 0x207a records (per-0x2031 count distribution {1:12, 2:1, 3:3, 4:2, 6:1} = 37 records; 7/19 sessions have >1). Exactly one 0x2031 per session, TOP-LEVEL (no parent), so 0x207a has no tree-siblings other than fellow 0x207a records. In top-level order the 0x2031 is consistently preceded by 0x2063 and followed by 0x204d (all 19). 0x2024/0x2056 also exist as top-level view blocks but are NOT adjacent to 0x2031.
+- **Size:** span 35 bytes = header(9) + payload(26). Header: 5A, block_type u16@z+1 = 2, size u32@z+3 = 28, content_type u16@z+7 = 0x207a. (Declared size field 28 → 26-byte payload; span end = z+7+28 = z+35.) Constant across all 37.
+- **Fields (payload-relative):**
+  - `+0 u32 ordinal` = 1-based index of the record within its 0x2031 (== occurrence_index+1 for all 37; values 1..6). CONFIRMED invariant.
+  - `+4 u32 = 1` (const, all 37 — bytes[4..7] = 01 00 00 00). CONFIRMED invariant.
+  - `+8 u8 tag = 0x40 + ordinal`, i.e. 0x41..0x46 (== 0x40+ordinal for all 37). 0x40|ordinal and 0x40+ordinal are identical for ordinals 1..6, so OR-vs-ADD is indistinguishable. CONFIRMED invariant.
+  - `+9 u16 view field A` (values 0, 16, or 20; byte[10] always 0). i16/u16 indistinguishable. Constant-per-session, varies by session — view state.
+  - `+11 u16 view field B` (values 2, 16, or 20; byte[12] always 0). Small non-negative. Constant-per-session, varies by session — view state.
+  - `+13 i32 signed view offset` (values 16, 24, or negative e.g. −1064/−1038/−1035). Equally readable as i16@+13 followed by i16@+15 that is 0 (positive) or −1 (negative, sign-extension) — i32 and paired-i16 readings numerically identical; width cannot be disambiguated. View-recomputed; varies by session.
+  - `+17 i32 signed view offset` (values 512, 1024, 7936=0x1F00, or −256; byte[17] always 0). Same i32-vs-i16 ambiguity. View-recomputed; varies by session.
+  - `+21 i32` = 255 (negative-offset sessions) or 0 (positive-offset sessions); byte[22..24] always 0 in positive sessions. Same width ambiguity; co-varies with sign of +13/+17. View-recomputed.
+  - `+25 u8 = 0` (payload tail, const, all 37). CONFIRMED invariant.
+- **Notes:** Per-view/window layout record inside the session's single top-level 0x2031 view-settings container. N = number of saved views/windows/rulers, each a fixed 26-byte record carrying small view coordinates/offsets. Display/view state PT recomputes on save — the coordinate fields (bytes 13..21) drift between saves and differ by session, so do NOT treat their specific values as stable data. **HIGH** for identity/structure (framing, LEAF, parent==0x2031, single 0x2031 per session, and the exact invariants +0 ordinal, +4==1, +8==0x40+ordinal, +25==0); **MEDIUM/LOW** for the coordinate fields +9/+11/+13/+17/+21 — offsets and values reproduce exactly but field WIDTHS (i32 vs paired i16) are undeterminable and meanings are inferred display state.
+- **Confidence:** high for identity/structure; medium/low for the coordinate-field widths & semantics.
+
+### 0x1018 — Session plug-in (insert) registry
+
+- **Kind:** CONTAINER. Immediate children: 0x1017 ONLY (655/655; zero exceptions across 19 sessions). Parent: ROOT (top-level, all 19). block_type = 0x0001 (all 19). NOTE: the 0x1018→0x1017 relationship is exclusive, but 0x1017 is NOT exclusive to 0x1018 — 38 sibling 0x1017 blocks in the corpus live under 0x204a instead (empty/unassigned insert-slot descriptors: byte0=0xFF, zero-length name).
+- **Size:** Variable. Observed payload (size field) range 90..2865 bytes; grows ~linearly with child count (2→90B, 4→176B, 10→781B, 47→1970B, 66→2732B, 69→2865B). CORRECTION: the proposal's '8-byte' minimum is NOT observed — no corpus session has an empty registry; smallest real block is 90 bytes (count=2). '8' is at best a theoretical unconfirmed empty case.
+- **Fields (payload-relative):**
+  - `+0 u32 count` = number of 0x1017 child entries. VERIFIED count == #immediate 0x1017 children (all 19, 0 mismatches).
+  - `+4..` sequence of `count` 0x1017 child blocks, each a 0x5A-framed (header `5A <btype:2> <size:4> 17 10`) plug-in descriptor. Child block_type is 0x0004 or 0x0006 (NOT 0x0001 — that is the parent 0x1018's block_type).
+- **Notes:** The flat de-duplicated list of every plug-in instantiated anywhere in the session. Top-level singleton, present exactly once in all 19 loadable non-huge sessions; child count/size scales with distinct plug-in instances. Child 0x1017 payload layout (MEDIUM, partially decoded): [byte0 = category flag, distribution {0:176, 3:411, 4:23, 8:45}] then [u32-length-prefixed ASCII plug-in name] (655/655 parsed cleanly: 'EQ3 7-Band','FabFilter Pro-Q 2','CLA-76','Click II', etc). The bytes after the name are NOT a name scramble — they are a FIXED 12-byte region = three reversed FourCC codes (AAX manufacturer + type + sub-type IDs), e.g. reversed manufacturer 'ksWV'=Waves(303×), 'Digi'=Digidesign(149×), 'FabF'=FabFilter(24×), 'NiIn'=Native Instruments, 'Antr'=Antares, 'iZtp'=iZotope. After the 12-byte FourCC region is a 7-byte flag trailer (dominant 01000100000000 / 02010201000000). Some children additionally carry a length-prefixed 'com.*' AAX bundle-ID string and/or a nested 0x5A sub-block (only 33/655), so the tail beyond the FourCC field is variable and not fully schematized.
+- **Confidence:** high (container structure); medium (child 0x1017 payload).
+
+### 0x1017 — Plug-in descriptor entry (parent 0x1018) / placeholder record (parent 0x204a)
+
+- **Kind:** LEAF (no real children; any apparent child is a false positive from the raw 0x5A scan hitting a 0x5A='Z' byte inside the 12-byte code). Two parent contexts: parent 0x1018 (655 instances, the plug-in catalog) and parent 0x204a (38 instances, a different placeholder record). Both 0x1018 and 0x204a are top-level ROOT singletons, 1 per session.
+- **Size:** Variable. Parent-0x1018 entries: block_type 0x04 (older sessions) or 0x06 (newer), payload ~21..90 B sized to name length (+ optional reverse-domain ID). Parent-0x204a entries: mostly 26/32 B, payloads dominated by 0xFF/00.
+- **Fields (parent-0x1018 catalog entry, payload starts at z+9):**
+  - `+0 u8` category/state flag; observed {0,3,4,8}; does NOT cleanly partition by plug-in identity (e.g. 'L2' under both 0 and 3) — treat as an opaque small flag.
+  - `+1 u32 strlen1`, then strlen1 ASCII bytes = plug-in display name (e.g. 'Altiverb 7', 'FabFilter Pro-Q 2'). Decodes cleanly for all 655/655 entries in every one of 19 sessions.
+  - `+(name_end), 12 bytes`: scrambled plug-in code (mfr/type/subtype-derived). NOT a pure name hash: 35 of 74 distinct names carry ≥2 distinct codes; the same plug-in name varies by instance.
+  - `+(name_end+12), 7 bytes`: I/O descriptor. First u16 = input format, next u16 = output format (0x0001=mono, 0x0102=stereo); e.g. mono='01 00 01 00', stereo='02 01 02 01'. Varies per INSTANCE for one name → confirms it is I/O config, not a name field. Remaining 3 bytes are a small flag (usual '00 00 00'; also '64 00 00','03 00 00','00 00 01','02 00 00').
+  - `+(name_end+19)` OPTIONAL: u32 strlen2 + reverse-domain plug-in ID (`com.<vendor>.aax…` — e.g. `com.fabfilter…`, `com.waves.aax…`, `com.Antares…`), then 2 trailing bytes ('00 00'/'01 01'/'00 01'). Present in 67 entries across 6 (block_type-0x06) sessions.
+  - PARENT-0x204a entries are STRUCTURALLY DIFFERENT: byte0 usually 0xFF (36/38) with mostly-zero payloads; a couple (byte0=3) carry a name. These are placeholder/slot records, NOT plug-in descriptors.
+- **Notes:** Decoded here to establish 0x1018's role; not in the originally requested set. Total 0x1017 = 693 (655 under 0x1018 + 38 under 0x204a) — 'parent: 0x1018 (always)' is FALSE. The 12-byte code is NOT a name-derived hash (same name → multiple codes; varies by instance). This aligns with docs/ptx-format-spec.md line 300-303 ('12-byte plugin id, and a 4-byte (in,out) IO') rather than a 'name-hash' framing. **HIGH** for the parent-0x1018 name-at-offset-1 layout and LEAF/parent facts (655/655 / 19 sessions); **MEDIUM** for the exact semantics of the +0 category byte and the 3-byte I/O tail (values enumerated, meaning not pinned); the parent-0x204a population is characterized but its field schema is not fully decoded.
+- **Confidence:** high (parent-0x1018 layout); medium (category byte / I/O tail semantics; 0x204a schema not fully decoded).
+
+### 0x1006 — External media / video-file table
+
+- **Kind:** CONTAINER; children: one 0x103a name-list (ALWAYS, block_type 0x0001) + count × 0x1005 media descriptors (block_type 0x0009, only when non-empty). Parent: ROOT. 1 instance per session. Each 0x1005 in turn contains exactly one 0x1002 child.
+- **Size:** Variable. Declared size field (u32@z+3) = 19 when empty (18/19 sessions, byte-identical); total block span is then 26 bytes and payload (after the 2-byte content_type) is 17 bytes. Grows with entries: MANOLITO size field = 4421 (span 4428) for 16 files.
+- **Fields (payload-relative, +0 = z+9):**
+  - `+0 u32 count` = number of 0x1005 media-descriptor children (0 in all 18 empty sessions, 16 in MANOLITO; matched child count exactly in all 19).
+  - `+4..` one 0x103a name-list child (block_type 0x0001) — ALWAYS present. Empty form: 13 bytes `5A 01 00 06 00 00 00 3A 10 00 00 00 00` (its own inner u32 list-count = 0). When populated it holds the collection label ('Video Files') plus per-file name entries and volume names inline as length-prefixed ASCII strings — the same name-list role PT-confirmed for 0x103a under 0x1004, NOT merely an 'empty-list marker'.
+  - `+...` then `count` × 0x1005 media descriptors (only when count>0). Each 0x1005 = `u32 count(=1)` + one nested 0x1002 child; internal schema not fully characterized (single populated session).
+- **Notes:** The session's list of imported video/media files — the direct analog of 0x1004 (the WAV file table), with 0x1005 replacing 0x1003 and 0x1002 replacing 0x1001. Top-level ROOT singleton (1 per session, 19/19). Empty in 18/19; populated only by MANOLITO (16 files, 'Video Files', .mp4/.mov, volume 'Samsung_T3'). block_type = 0x0002 (z+1). CORRECTION: the claim that each 0x1005 'begins with a length/id header + reserved GUID space (2A 00 00 00 tag)' is UNCONFIRMED/likely wrong — NO 2A 00 00 00 GUID tag appears in any of the 16 0x1005 records (SMPTE-UL bytes `06 0a 2b 34...` appear inside the 0x1002, but not the tagged-GUID convention). The 0x1005/0x1002 field schema is observable in only one session — **treat as low-confidence.** Verified across ≥2 projects (18 empty instances span DWTS, Reverse Rewire, Bianca, COGNAC, DOPE, Let Her Go, Never Will Marry, Quality Time, THE WIND; single populated = MANOLITO).
+- **Confidence:** high (table structure); low for the 0x1005/0x1002 internal schema (single populated session).
+
+### 0x2024 — Default main-counter / nudge time-display setting
+
+- **Kind:** TWO FORMS, both a single TOP-LEVEL (ROOT-parented) block. LEAF form: block_type=0x0005, block-size field=8 (payload=6 bytes: the 3 u16 fields), no children. CONTAINER form: block_type=0x0006, block-size field=106, exactly one child (content_type=0x0f3e at payload offset +6) carrying the string cache. Parent is ALWAYS root; exactly ONE 0x2024 per session (all 19). The proposed claim it 'also appears repeated inside other view containers' was NOT observed and is removed.
+- **Size:** Bimodal by declared size field: 8 (leaf, block_type 0x0005, 10/19 sessions) or 106 (container, block_type 0x0006, 9/19 sessions). For the leaf the actual PAYLOAD is 6 bytes (3 u16); '8' is the size field (payload + the 2-byte content_type).
+- **Fields (payload-relative):**
+  - `+0 u16 fieldA` — timebase-mode enum; values {1,3} (3 in 14/19, 1 in 5/19). Correlates with fieldC.
+  - `+2 u16 fieldB` — secondary enum; almost always 1 (18/19); one container outlier had 0.
+  - `+4 u16 fieldC` — unit/format enum; values {1,8}; tracks fieldA exactly (A=3↔C=1, A=1↔C=8). Enum MEANINGS (which is 'mode' vs 'format' vs 'unit') are NOT derivable from the corpus and are labeled speculatively.
+  - `+6 (CONTAINER form only)` one 0x0f3e child block (declared size field=91, payload=89 bytes) holding the 5-timebase string cache. The 3 leading u16 fields use an IDENTICAL schema in both forms.
+- **Notes:** A coupled 3-field timebase-mode selector, plus (container form only) a cached rendering of one small reference time value across all 5 PT timebases. View/edit-preference state that PT recomputes; the string cache is derived, not authoritative. The 0x0f3e child schema is NOT plain length-prefixed strings — it is: u32 count(=5), then 5 records each = [1-byte index tag 0x00..0x04][u32 len][len ASCII], then 1 trailing 0x00. Head==5, tag sequence (0,1,2,3,4), childsize==91 held in ALL 9 containers; the 5 strings are byte-identical in all 9 and render one tiny reference time (Bars|Beats '    0| 0| 060', Min:Secs '  0:00.001', Timecode '00:00:00:00.01', Feet+Frames '    0+00.01', Samples '          1'). The leaf form omits this cache (PT regenerates it). **Field-value ENUM SEMANTICS are the only low-confidence part** — offsets/widths/structure are firmly confirmed; the labels 'mode/format/unit' are plausible but unconfirmable.
+- **Confidence:** high (structure); low for the enum semantics of fieldA/B/C.
+
+### 0x2501 — Timeline/edit-window horizontal zoom & ruler-scale view-state record
+
+- **Kind:** LEAF (no children). block_type=0x0006. Parents observed: ROOT (exactly 1 top-level instance in every one of the 19 sessions) OR 0x258b (0..2 nested per session; 17 nested instances total). 0x258b (block_type 0x0001) is itself a per-view container that sits under EITHER 0x2016 or 0x2551 (not exclusively 0x2551).
+- **Size:** Fixed: block_size=147, payload=145 bytes (span=[z, z+7+147]). Holds across ALL 36 instances / 19 sessions. 124 of 145 payload bytes are constant; the 21 variable bytes are the zoom/scroll/window-geometry scalars.
+- **Fields (payload-relative):**
+  - `+0 u8 flag = 0` (const, all 36).
+  - `+1 u16 field A`: zoom/scroll param — VARIES (0,1001,1517,2425,2819,19080,26738,36147,55833).
+  - `+3 u16 field B`: small enum in {0,1,4} — VARIES.
+  - `+5 u32 field C`: scroll/offset param — VARIES (co-varies with A).
+  - `+9 f64 horizontal scale/zoom factor` — VARIES (e.g. 4096.0, 4320.0, 270.0, 14336.0, 65536.0, 2529.384; 0.0 when unset).
+  - `+17 u16 string-count = 5` (const) — NOTE: the proposal omitted this count prefix; the five strings begin at offset 19, not 17.
+  - `+19 str(len-prefixed u32)` Bars|Beats: len13 '    0| 0| 240' — CONST cached ruler render.
+  - `+36 str` Min:Secs: len10 '  0:00.100' — CONST.
+  - `+50 str` Timecode: len14 '00:00:00:01.00' — CONST.
+  - `+68 str` Feet+Frames: len11 '    0+01.00' — CONST.
+  - `+83 str` Samples: len11 '        100' — CONST (strings occupy 19..97; all 5 identical across every instance).
+  - `+98 u16 record-count = 5` (const), then 5× const 5-byte record '01 00 00 00 20' (per-ruler flag=1, value=space) spanning 100..124.
+  - `+125 u16 tag 0x0013 (const=19)`, `+127 u16 X geometry value` — VARIES in {19,92,300}.
+  - `+129 u16 tag 0x0017 (const=23)`, `+131 u16 Y geometry value` — VARIES in {23,97,320}; (X,Y) is always one of exactly 3 pairs {(300,320),(92,97),(19,23)}.
+  - `+133, 8 bytes` const '00 d4 30 00 00 03 00 00'.
+  - `+141, 4 bytes` trailing view-state field — VARIES; usually 0, else values like 18511/23855/25970 and 0xffffc940 (bytes 143-144 also vary, e.g. ff ff), so this is NOT a clean u16 — the proposed 'u16@141' undercounts by 2 bytes.
+- **Notes:** Scroll/zoom parameters plus a cached 5-timebase text rendering of a reference position, one per view context. Purely display state PT recomputes; not authored data. The variable bytes are exactly offsets {1,2,3,5,6,9-16,127,128,131,132,141,142,143,144}. **CORRECTIONS:** (1) offset 17 is a u16 string-COUNT (=5), strings start at 19; (2) the field at 141 is a 4-byte tail, not a u16; (3) the 'nested instances share their 0x258b container value' claim is OVERSTATED — 13/19 sessions have byte-identical instances, but MANOLITO SIMONET has three DIVERGENT instances, so values are genuinely per-view-context and only coincidentally equal elsewhere; (4) 0x258b's parent is 0x2016 (9×) OR 0x2551 (8×), not always 0x2551; observed siblings 0x2011/0x2552..0x2556, NOT the claimed 0x258a. Confidence stays medium because the container structure is fully confirmed but the individual zoom scalars' exact meaning is not independently decodable.
+- **Confidence:** medium.
+
+### 0x2433 — Empty list/collection header
+
+- **Kind:** LEAF (0 immediate children, all 32). Parents: ROOT (exactly 1 top-level instance in every session that has the type) and 0x271b (the innermost/only enclosing block for the second instance, present in 6 sessions). block_type=0x0001.
+- **Size:** Fixed. size field u32 = 6 in all 32 instances (2-byte content_type + 4-byte payload). Full framed span (header 0x5A + type + size + content_type + payload) = 13 bytes. Verified across 26 sessions.
+- **Fields (payload-relative):**
+  - `+0 u32 count = 0` (empty collection) — const across all 32. Payload is exactly these 4 bytes; size=6 leaves no room for any member record, so the non-empty member schema is unobservable in this corpus.
+- **Notes:** Structural placeholder — an empty group with no members. One instance is always top-level (ROOT); in ~1/3 of sessions a second instance is owned by container 0x271b and sits immediately before the ROOT one. block_type=0x0001 with a single u32=0 payload is PT's canonical 'empty collection' idiom. 32 instances / 26 sessions (incl. the 7 huge Hipsters), all byte-identical — no non-empty instance ever appears, so the member schema cannot be observed. The earlier raw hex showing a trailing '5a05' was header bleed from the next block (the byte after the 13-byte span is 0x5A in 32/32). The semantic meaning of 'what collection' is inferred, not observable (always empty).
+- **Confidence:** high.
+
+### 0x2437 — Empty count-prefixed collection/list header
+
+- **Kind:** LEAF (0 immediate or nested children, all 25). Parents observed: ROOT (19 instances — one top-level copy per session, all 19 sessions that have the type) and container 0x271c (6 instances — when present, holds exactly one 0x2437 among children [0x2619, 0x2437]). block_type = 0x0001 (all 25).
+- **Size:** Fixed: block_type=0x0001, declared size=6, total span=13 bytes (9 header bytes + a 4-byte payload) in all 25 / 19 sessions. 100% uniform.
+- **Fields (payload-relative):**
+  - `+0 u32 element_count = 0` (empty collection). Payload offset 0 = block offset z+9. Constant 0x00000000 across all 25; the collection is empty everywhere, so no member records are present to schematize.
+- **Notes:** Always-empty structural placeholder. Paired with 0x2433 (identical encoding, always co-occurring, equal per-session counts) but owned by a different container: 0x271c (vs 0x2433's 0x271b). Both are same-size ROOT-level sibling containers with immediate children [0x2619, <the list>]. The 19 ROOT instances = 19 sessions (one top-level copy each); the 6 container-owned instances are the 6 sessions that additionally carry the 0x271b/0x271c container pair (those sessions have 2 copies of each). Looks like session-level view/collection state PT maintains, not per-track data. The STRUCTURE (encoding/size/parent/kind) is high-confidence, but the SEMANTIC role ('collection of X owned by 0x271c') is INFERRED because the list is empty in 100% of instances and its member schema is unobservable.
+- **Confidence:** high.
+
+### 0x2637 — Session automation/keyframe table
+
+- **Kind:** CONTAINER-LIKE LEAF, opaque to the 0x5A framer: exactly one 0x2637 block per session, block_type(u16@z+1)=1 always, parent = final-index ROOT (top-level singleton, always positioned before the trailing 0x0002 master index). Its payload is a self-parsed table of inline records that are NOT 0x5A-framed, so the raw block enumerator sees zero children. Verified TOP-LEVEL / children=0 / bt=1 across all 26 corpus sessions (19 decoded in detail + 7 Hipsters).
+- **Size:** block_type(u16@z+1)=1 always. Payload length observed 4..43264 bytes (grows with record count; 43264 = 1438 records). Present exactly once per session. Empty automation = payload is exactly 0x00000000 (record_count=0), seen in Let Her Go and Quality Time. Records are contiguous with ZERO trailing bytes (payload_len == 4 + Σ(record lengths) for every session).
+- **Fields (payload-relative):**
+  - `+0 u32 record_count` == number of records (VERIFIED count@0 == #records parsed, 0 failures across all 26 incl. empty rc=0).
+  - `+4..` record[i]: variable-length inline record; exactly record_count of them, packed contiguously, no padding/trailing bytes (VERIFIED).
+  - `record+0, 4` const 0x00014601 little-endian (record start marker; VERIFIED on all 4729 records, 0 mismatches).
+  - `record+4 u32 rec_size` == record_length − 8 (VERIFIED all records).
+  - `record+8 u16 == 0` (VERIFIED all records).
+  - `record+10 u32 n` = number of breakpoints in this record (values 1,2,3,5; n=1 is 4683/4729 records).
+  - `record+14 u32 descriptor`: low u16 == 4 (bytes-per-value = f32), high u16 == n−1 (VERIFIED both halves all records).
+  - `record+18 u32 record-level anchor/position field`. HEDGED: for the 4682/4683 single-breakpoint records this holds a session-scale, increasing sample-position-like value while the breakpoint's own pos@22 is 0; for multi-breakpoint records it is often 0 (real timeline in the breakpoint positions) but sometimes non-zero and NOT equal to the first breakpoint position. Equals the first breakpoint's sample_position in only ~42% of records. Position/anchor-like but its exact meaning vs. the breakpoint positions is NOT fully resolved — do not rely on a single clean rule.
+  - `record+22, 8*n` breakpoint[m] = `{u32 sample_position, f32 value}`. reclen == 22 + 8*n (VERIFIED all records). For multi-breakpoint records the sample_positions are monotonically non-decreasing EXCEPT a 0xFFFFFFFF (−1) sentinel may appear as the first position (3 records total, all in the DWTS trio; after dropping the sentinel, positions are strictly monotonic). value is an IEEE-754 f32, corpus range −32.9..+23.1, dB/gain-like.
+- **Notes:** Real persisted automation data (a count-prefixed list of automation records, each holding breakpoints whose f32 values decode as dB-like gain/fader magnitudes, dominated by discrete half-dB steps), NOT a view-state recompute. Empty (0 records) in sessions with no automation. Because records are self-describing and not 0x5A-framed, a builder/editor must parse the inline table itself (walk by the 0x00014601 marker + rec_size). Record-length distribution: 30 B for n=1 (4683), 38 for n=2 (39), 46 for n=3 (5), 62 for n=5 (2). **HIGH for structure** (all structural invariants hold with zero exceptions across 26 sessions / 4729 records); **MEDIUM for exact time-position semantics** — specifically the record+18 'anchor' meaning (only ~42% match the first breakpoint) and the raw monotonicity claim (holds only after treating −1 as a sentinel), both over-precise in the proposal. The value column is solid; the exact position column is probable-but-hedged.
+- **Confidence:** high (structure); medium (exact time-position semantics of record+18 and monotonicity).
+
+### 0x2632 — Reserved/placeholder top-level singleton (always-zero u32)
+
+- **Kind:** LEAF; no children (nchild=0 all instances); parent = final-index ROOT (top-level singleton — 0 enclosing blocks). Structurally always sits immediately before a 0x262a block; the block before it (start-order) is 0x262c or 0x2526.
+- **Size:** block_type (u16@z+1) = 1 always; declared size field (u32@z+3) = 6 always; span = [z, z+13] = 13 bytes total; payload = size−2 = exactly 4 bytes always. Uniform across all instances (e == z+7+size in every case, so the 4-byte payload width is trustworthy).
+- **Fields (payload-relative):**
+  - `+0 u32 = 0x00000000` (payload bytes `00 00 00 00` in EVERY session; a reserved/always-zero dword — likely a count or flag that is 0 whenever the feature is unused. Cannot be distinguished from a generic reserved word given zero variability).
+- **Notes:** A top-level session singleton carrying no data — a reserved/placeholder slot always present but byte-identical (payload all-zero) in every corpus session. Best read as a header/anchor for a feature that is unused or left at default in all sessions examined. **HIGH for structure/framing** (singleton; bt=1; size=6; 4-byte all-zero payload; LEAF; top-level; byte-identical — VERIFIED across all 26 corpus sessions incl. the 7 Hipsters, exactly 1 instance each); **LOW/UNCONFIRMABLE for field SEMANTICS** — because the payload is all-zero in 100% of instances, the precise meaning of the u32 cannot be determined; it is honestly just 'always-zero'. Do not over-claim a per-field schema.
+- **Confidence:** high for structure/framing; low/unconfirmable for the u32 semantics.
+
+### 0x2032 — Single-slot wrapper/selector (session config/display-mode)
+
+- **Kind:** CONTAINER; block_type(u16@z+1)=2. Exactly 1 immediate child, content-type 0x2042 (10/19 sessions) or 0x270a (9/19) — mutually exclusive, never both, never zero. Parent = final-index ROOT (top-level singleton, no enclosing block, all 19). The child's OWN block_type is a size-class, not an identity: 0x2042 child has block_type=7; 0x270a child has block_type=8 when its payload is 31 B and 9 when 33 B.
+- **Size:** 0x2032 payload 19 bytes when child is 0x2042 (empty form); 40 bytes (31-B child) or 42 bytes (33-B child) when child is 0x270a. (Whole-block span = payload+9.)
+- **Fields (payload-relative):**
+  - `+0..` embedded 0x5A child block: `5A <block_type:2> <size:4 = child_payload_len+2> <ct:2 = 0x2042 or 0x270a> <child payload>`. 0x2032 has no other fields.
+  - CHILD 0x2042 (empty/default, payload always 10 bytes; byte-identical in all 10 = `01000000 01000000 0000`): +0 u32=1, +4 u32=1, +8 u16=0. CONFIRMED.
+  - CHILD 0x270a (populated, payload 31 or 33 bytes): +0 u32=0; +4 u8 count ∈ {1,3}; +5 u8=1; +6..13 all zero; `+14 u8 ALWAYS 0` (the proposal's '+14 = value' is an OFF-BY-ONE ERROR); `+15 u8 value` = 0x06 when count=1, 0x0c when count=3 (equivalently u16@+14 = value); +16..29 all zero; +30 u8 tag = 0x02 when count=1, 0x01 when count=3. Optional 2-byte tail only in the 33-byte form: +31 = value byte (0x06 or 0x0c, repeats +15), +32 = 0x00. The 31-byte form has no tail after +30.
+- **Notes:** A single-slot wrapper carrying no fields of its own beyond the embedded child — a small top-level session-config/display-mode record. Form selection is NOT session-size/automation-count driven: Bianca (26684 blocks, 9 automation records) uses the EMPTY 0x2042 form while the far smaller Never Will Marry (4309 blocks) uses 0x270a — confirming it is a display/config mode PT chooses (likely recomputed), not a structural count. count/value/tag pairing: count=1→value=6/tag=0x02, count=3→value=12/tag=0x01 (only these two combinations; no arithmetic law can be pinned from 2 data points). **HIGH** on all structure (wrapper=1 child, mutual exclusivity, always ROOT, 0x2042/0x270a occur ONLY under 0x2032; 0 exceptions across 19 sessions), on the 0x2042 byte layout (10/10 byte-identical), and on the corrected 0x270a offsets; **LOWER** only on the SEMANTIC meaning of the 0x270a count/value/tag triple.
+- **Confidence:** high (structure & offsets); lower for the 0x270a count/value/tag semantics.
+
+### 0x2031 — View/layout enumeration container
+
+- **Kind:** CONTAINER; block_type (u16@z+1) = 3 (verified 20/20 sessions). Immediate children are 1..6 blocks of content_type 0x207a (each block_type=2, declared size=28); the payload's leading u32 count equals the number of 0x207a children exactly (all sessions). PARENT: none — 0x2031 is a top-level (depth-0) singleton in the raw 0x5A block tree, not enclosed by any 0x5A block. The final-index (master TOC) references it directly. In the top-level sequence it sits between content_type 0x2063 (previous) and 0x204d (next).
+- **Size:** Payload = 4 + 35*n bytes, n = child count (each 0x207a child occupies a 35-byte span: 7-byte 0x5A header wrapper + 28-byte body). Observed: 39 (n=1), 74 (n=2), 109 (n=3), 144 (n=4), 214 (n=6). n=1 in most sessions; up to 6 (Bianca). Formula exact across all sessions. (Declared size field u32@z+3 = paylen+2, e.g. 41 for a 39-byte payload.)
+- **Fields (payload-relative):**
+  - `+0 u32 child_count` == number of embedded 0x207a children (all 20 sessions).
+  - `+4..` child_count embedded 0x5A blocks of content_type 0x207a (block_type=2, size=28, 26-byte payload). Field offsets below are relative to each 0x207a PAYLOAD start (child z + 9):
+    - `child+0 u32 ordinal`, 1-based, strictly sequential 1,2,3,... (all sessions).
+    - `child+4 u32 = 1` constant (a sub-count; always 1 in every child of every session).
+    - `child+8 u8 letter tag = 0x41 + (ordinal−1)` i.e. 'A','B','C',... strictly sequential (all sessions).
+    - `child+9 u16 dim_w` — display geometry (16 in multi-child sessions; 20 or 0 in single-child). Meaning inferred from value ranges.
+    - `child+11 u16 dim_h` — display geometry (16 in multi-child; 20 or 2 in single-child).
+    - `child+13 i32 offset/position` — signed. POSITIVE small (+16 or +24) in multi-child; large NEGATIVE (~ −1035..−1064) in single-child. Interpreted as a scroll/geometry pixel-like offset; PT recomputes.
+    - `child+17 u8 = 0` constant (all sessions).
+    - `child+18 u16 flag` — per-session constant (same across all children within a session), varies between sessions: 0x001f, 0x0002, or 0x0004 in the positive-offset variant; 0xffff in the negative-offset variant.
+    - `child+20, 6 bytes trailing` — '00 00 00 00 00 00' (positive-offset variant); 'ff ff 00 00 00 00' (negative-offset variant). NOTE: in the negative-offset variant bytes child+18..child+21 read 'ff ff ff ff', so the child+18 flag and the first 2 trailing bytes may together be a single wider sentinel — treat this boundary as tentative.
+- **Notes:** Holds a count-prefixed list of enumerated view items, each embedded as a 0x207a block tagged with a sequential ASCII letter ('A','B','C',...) and carrying small dimension/offset geometry (16×16 or 20×20 sizes, a signed pixel-like offset, and a small per-session flag). Characteristic of edit-window view sub-lanes / ruler-row layout state; a display-state structure PT recomputes, not load-bearing session data. Two clear variants: single-child sessions use a negative-offset descriptor with a 0xffff sentinel and dim 20×20 or 0×2; multi-child sessions enumerate 16×16 items with positive +16/+24 offsets and a per-session flag (0x1f/0x02/0x04). **HIGH** on container structure & enumeration invariants (block_type=3; child_count==#0x207a; sequential ordinals/letters; subc==1; byte17==0; child block_type=2/size=28; size == 4+35*n; top-level singleton with no enclosing block — verified across 20 sessions incl. the 125k-block Hipsters); **MEDIUM** on the inner geometry field meanings (interpreted from value ranges into two variants); the exact child+18/child+20 boundary is tentative in the 0xffff variant.
+- **Confidence:** high (container structure/enumeration); medium (inner geometry-field meanings; child+18/+20 boundary).
+
+### 0x2025 — Session view/window-state singleton (display/UI extent)
+
+- **Kind:** LEAF; no children (nchild=0 in all 26 instances). Parent = final-index ROOT — top-level singleton (verified TOP-LEVEL / no containing parent block in every one of the 26 sessions).
+- **Size:** Exactly ONE instance per session (all 26). Two forms selected by block_type (u16@z+1): bt=1 → 18-byte payload (block size u32=20); bt=4 → 31-byte payload (block size u32=33). Corpus split: bt=1 = 17 instances (7 Hipsters + 7 Reverse Rewire + Bianca + Let Her Go + Quality Time); bt=4 = 9 instances (DWTS ×4, COGNAC, DOPE, MANOLITO, Never Will Marry, THE WIND). The proposal's counts were wrong (bt=4 is 9, not '11+'; bt=1 is 10 non-Hipsters / 17 total, not 4).
+- **Fields (payload-relative, +0 = z+9; nearly all bytes are 0 in nearly all sessions):**
+  - bt=4 form (31 bytes) VERIFIED TAIL (all 9 bt=4 instances): `+19 u16 = 0x2ee0 (12000)` — fixed extent/width default; `+21, 6 bytes = 0`; `+27 u8 = 0xfa (250)` — fixed extent/height default; `+28, 3 bytes = 0`. This 'e0 2e 00 00 00 00 00 00 fa 00 00 00' literal tail is a hardcoded default in every bt=4 instance.
+  - bt=4 form: `+0 u8 flag ∈ {0,1}` (enabled/visible toggle; =1 in DWTS ×4 + COGNAC, =0 in DOPE/MANOLITO/NWM/THE WIND) — INFERRED meaning.
+  - bt=4 interior variance (offsets 1..18): only two sessions deviate from all-zero. COGNAC: u8=1 at offset 9 (CORRECTION: the proposed '+14' is wrong; offset 14 is always 0). Never Will Marry: `u32@offset 10 = 0x553ad1 = 5585617` (a scroll/position value) — CONFIRMED.
+  - bt=1 form (18 bytes): offset 0 is ALWAYS 0 across all 17 bt=1 instances (NO +0 flag in this form — the proposed universal '+0 flag' is bt=4-only). Only Reverse Rewire deviates from all-zero: field @1 = 54503 (`e7 d4 00 00`; reads identically as u16 or u32), enum/flag @9 = 1, field @11 = 2250 (`ca 08 00 00`). All other bt=1 sessions (Hipsters, Bianca, Let Her Go, Quality Time) are entirely zero. bt=1 has NO 0x2ee0/0xfa default suffix — that exists only in bt=4.
+- **Notes:** A small top-level session view/window-state singleton (display/UI-extent structure PT recomputes). Payload is almost entirely zeros with a stable hardcoded default suffix in the bt=4 form (12000 and 250 = fixed extent). A handful of interior bytes are non-zero in a minority of sessions and encode per-session scroll/position/flag state. **MEDIUM** — singleton status, top-level/no-parent, leaf, the two block_type forms and their exact sizes, and the bt=4 hardcoded 12000/250 tail are all proven; the interior is sparse and mostly-zero, so individual interior field MEANINGS (view extent / scroll / flag) are INFERRED, not proven. Do not over-trust the zero interior as a fixed schema.
+- **Confidence:** medium.
+
+### 0x2026 — Session view/display-preferences singleton
+
+- **Kind:** LEAF; no children (nkids=0 all 26). Parent = final-index ROOT: top-level block in the contiguous top-level chain (is_top_level=True; neighbors 0x1028 before, 0x2032 after). block_type(u16@z+1)=4 in ALL 26. Header: `5A 04 00 <size:u32> <26 20>`, payload starts at z+9.
+- **Size:** 20-byte payload / block_size=22 (base form, 23 of 26 sessions incl. all 7 Hipsters) OR 28-byte payload / block_size=30 (extended form: exactly COGNAC, DOPE, Never Will Marry). Selection is deterministic: payload byte@15==1 ⇔ extended (28B) ⇔ byte@16==1 (all equivalences hold across every instance).
+- **Fields (payload-relative):**
+  - `+0 u8 boolean flag` (0x00 in 20 instances, 0x01 in 6).
+  - `+1 u16 = 0x0006` (const tag/version, all 26; byte@1==0x06, byte@2==0x00).
+  - `+3, 4 bytes always 0x00` (offsets 3,4,5,6).
+  - `+7 u8 flag = 0x04 (19 instances) or 0x00 (7)`; a separate byte, NOT part of value@8. Does not map to any structural count.
+  - `+8 u32 per-session value` (only byte@8 varies; bytes 9-11 always 0, so value<256; observed 11,14,40,89,97,167,171). NOT a track/region/wav/midi count — verified independent of all four.
+  - `+12 u8 = 0x02` (const tag, all 26).
+  - `+13 u8 high-bit mode/bitfield`, values {0x00, 0x80, 0xc0} (0x80 and 0x40 bits set/clear together in corpus).
+  - `+14 u8 mode bit`, values {0x00, 0x01}.
+  - `+15 u8 EXTENDED-FORM GATE`: ==0x01 → 28-byte extended form (also implies byte@16==0x01); ==0x00 → 20-byte base form.
+  - `+16 u32 = 0` (base form only; offsets 16-19 all zero in every 20-byte instance).
+  - `+16, 12 bytes fixed tail` (extended form only): u32=1, u32=1, u32=18 (0x12) — byte-identical in all 3 extended sessions.
+- **Notes:** Top-level session view/display-preferences singleton, co-occurring with a single 0x2025 singleton (both once per session, all 26; 0x2025 sits 6-7 top-level positions after 0x2026, so 'paired' means co-occurring, NOT adjacent). value@8 disproof of a count: sessions with 2 vs 121 tracks BOTH have value=97; sessions with 24907 vs 2506 tracks BOTH have value=11; COGNAC(336)/DOPE(1120)/Never Will(404) tracks all have value=167 (checked against len(tracks)/regions/audiofiles/miditracks — no correlation). value=167 coinciding with the 3 extended-form sessions is a 3-sample coincidence, not a proven rule. **HIGH** on framing/structure (block_type=4, LEAF, top-level singleton, 0x2025 co-occurrence, const 0x0006@1, const 0x02@12, base-vs-extended split, byte@15==1 → extended-with-fixed-{1,1,18}-tail — all across ALL 26 instances) and that value@8 is NOT a track/region/wav/midi count (explicitly disproven); **LOW** on the precise SEMANTIC of value@8, byte@7, and the byte@13-15 mode bytes (inferred view/display preferences).
+- **Confidence:** high (framing/structure); low for the semantics of value@8, byte@7, byte@13-15.
+
+### 0x2033 — Session I/O Setup / hardware routing map
+
+- **Kind:** LEAF (0 well-framed 0x5A sub-blocks inside the payload across all instances; internally a flat serialized path table of length-prefixed ASCII strings + 8-byte GUID refs). Parent: ROOT (top-level singleton, enclosed by no other block in all 26 files). Block order: IMMEDIATELY BEFORE 0x2000 (session data container) and immediately AFTER 0x1022, within the stable ROOT tail run ...0x1018, 0x2603, 0x1022, [0x2033], 0x2000, 0x2634, 0x1058 (identical across all 26). CORRECTION: the proposal's '0x1021/0x2638' predecessors are WRONG — neither content-type exists in ANY corpus session.
+- **Size:** VARIABLE and session-specific: payload 502..3124 bytes (size field 504..3126) across the corpus. Grows with number of I/O paths and name lengths. 10 distinct payloads over the 19 non-Hipsters sessions (11 distinct over all 26; files sharing a session lineage share bytes). Exactly ONE instance per session (26/26 files).
+- **Fields (payload-relative, +0 = zmark+9):**
+  - `+0 u16 = 0xffff` in ALL 26 sessions (INVARIANT reserved/none marker). CORRECTION: the proposal's claim that +0 also takes 0x0004/0x0070/0x0054 is WRONG — those live at +2.
+  - `+2 u16 optional index/count`, 0xffff = unset. Observed unset (0xffff) in 12 sessions and set to 0x0004, 0x0054(=84), 0x0070(=112) in others. Roughly tracks interface size but is NOT equal to +34 and NOT equal to the path-string count; exact meaning UNCONFIRMED — best described as an optional path-index/reference (0xffff when absent).
+  - `+4 u32 = 0x0000000b (11)` — INVARIANT (format/version constant).
+  - `+8, 22 bytes all 0xff` — reserved/null placeholder region (INVARIANT: all-0xff, all 26).
+  - `+30 u32 = 0x0000000b (11)` again — INVARIANT repeated section marker.
+  - `+34 u16 interface/hardware channel count (input side)`. Values 1,3,16,40,60,72. CORRECTION: NOT a 'path/slot count' of session I/O paths — does not match the number of path strings, tracks, or audio files (e.g. +34=1 with 132 path strings in THE WIND; +34=60 for both a 2-track and a 121-track session; +34=40 for both a 264-track and 2849-track DWTS). Reflects the physical I/O template/interface config of the saving machine, not per-session content.
+  - `+36 u16` = ALWAYS EQUAL to +34 in all 26 sessions (output-side channel count == input-side; the interface is symmetric).
+  - `+38..` path table: length-prefixed ASCII path names (u32 len + bytes), interleaved with 0x2A000000-tagged 8-byte GUID refs and 0x00/0xff filler; a repeated 8-byte GUID (same GUID appearing 3× in Reverse Rewire) = multiple paths referencing one I/O object. The 0x2A000000 GUID tag convention confirmed.
+- **Notes:** The serialized list of input/output/bus signal paths, physical port labels, their surround formats, and GUID cross-references — the embedded equivalent of a .pio file. Payload literally contains 'Built-in Output 1-2', 'Output 1-2', 'Out (Multiple destinations) 1-2'..'11-12', 'ADAT 5-6/7-8', 'Input11'..'Input128', channel-pair labels '1-2'..'79-80', and format tags '7.1.2'. block_type in the 9-byte frame header (u16@zmark+1) takes 14, 15, OR 22 (distribution: 14=17 files, 22=6, 15=3; the proposal omitted 15, common in COGNAC/DOPE/Never Will Marry). Because much of this block encodes the physical I/O hardware of the saving machine (not session content), a synthesizer should treat +38.. as an opaque template payload. **HIGH** on role, kind (LEAF/ROOT/singleton), position (immediately before 0x2000), size range, and header invariants +0=0xffff/+4=11/22×0xff@+8/+30=11/+34==+36 (verified across the FULL 26-file corpus, 4+ sessions byte-by-byte); **MEDIUM** on the semantics of +2 (optional index, unconfirmed) and +34/+36 (an interface channel count, NOT a session-path count — the proposal's 'path/slot count' label is downgraded); **MEDIUM** on the path-record grammar past +38 (string+GUID interleave decoded, GUID-repeat semantics confirmed, but the full per-record schema is not exhaustively formalized).
+- **Confidence:** high (role/kind/size/header invariants); medium (+2 semantics, +34/+36 label, and the +38.. path-record grammar).
+
+### 0x103e — Fixed session default-preferences / default-view-parameters blob
+
+- **Kind:** LEAF (0 children, all 19). Parent: 0x1040 (block_type=4 preferences-group container). Within 0x1040 it is the 3rd child, in the fixed child sequence 103d,103d,103e,103f,1041,104a,104b,104c,1041 (identical in all 19). Own block_type = 3.
+- **Size:** FIXED: size field = 214, payload = 212 bytes (payload = size − 2 for the content_type u16). Exactly ONE instance per session (all 19 non-huge). Payload byte-for-byte identical across all 19 (single SHA-256).
+- **Fields (payload-relative):**
+  - `+0 u32 = 4` (const, all 19).
+  - `+4 u32 = 1` (const, all 19).
+  - `+8 u32 = 1` (const, all 19).
+  - `+12..+203` heterogeneous fixed body. Contains many IEEE-754 f64 = 2.0 (0x4000000000000000) at 8-byte-aligned offsets 16,24,32,40,48,80,88,112,176,192 (plus near-2.0 values at 8,72,96,104,168,184), interleaved with small u32 ints at fixed offsets: 100@+56, 50@+64, 50@+120, 200@+124, 10@+148, 399@+156, 50@+164. Does NOT decompose into a clean count-prefixed or fixed-stride (u32,f64) array (a 12-byte-pair stride from +12 yields denormal garbage), because the 12-byte header leaves the f64=2.0 values 8-aligned but not at a uniform record stride. Treat as an opaque fixed blob.
+  - `+204 u32 = 6` (const tail marker, all 19; second-to-last u32).
+  - `+208 u32 = 9` (const tail marker, all 19; final u32, ending exactly at byte 212).
+- **Notes:** PT writes this BYTE-IDENTICAL in every corpus session (a hardcoded defaults blob, not user/session data) — a writer can transplant it verbatim. The recurring f64=2.0 values suggest default 2× zoom/scale factors, but the precise per-field meaning is not established. **HIGH that it is a fixed defaults table** (byte-identical across ALL 19 sessions; head [4,1,1]@+0/+4/+8 and tail [6,9]@+204/+208 verified on all 19; size/placement/LEAF/parent/sibling-sequence all held in every session); **DELIBERATELY LOW / UNCLAIMED on a precise per-field schema** of the +12..+204 body — it is a heterogeneous fixed blob, not a clean array, so individual field meanings are NOT specified; the 'default zoom/scale' reading of the f64=2.0 values is a plausible guess, not established (values never vary, so nothing correlates them to session parameters).
+- **Confidence:** high that it is a fixed defaults table; low/unclaimed on the interior per-field schema.
+
+### 0x103f — Fixed session default-values table
+
+- **Kind:** LEAF (0 children). Own block_type=1. Parent: 0x1040 (parent block_type=4, a top-level ROOT-child preferences group). 0x103f is the 4th child (index 3) in the fixed child sequence (0x103d,0x103d,0x103e,0x103f,0x1041,0x104a,0x104b,0x104c,0x1041), identical across all 19.
+- **Size:** FIXED: size field = 58, payload = 56 bytes. Exactly one per session; byte-identical across all 19 non-Hipsters sessions (single distinct payload, count 19), re-confirmed by name on DWTS and DOPE.
+- **Fields (payload-relative):**
+  - Payload = 14 consecutive u32 LE = [1, 1, 64, 1, 1, 200, 1, 127, 1, 400, 0, 1, 127, 0]. Every stated per-offset value verified 19/19.
+  - `+0 u32=1, +4 u32=1, +8 u32=64, +12 u32=1, +16 u32=1, +20 u32=200, +24 u32=1, +28 u32=127, +32 u32=1, +36 u32=400, +40 u32=0, +44 u32=1, +48 u32=127, +52 u32=0`.
+  - Values are clearly default parameter/limit constants (64=0x40, 200=0xc8, 127=0x7f MIDI-max, 400=0x190). SEMANTICS UNRESOLVED: the exact PT preference each u32 maps to is unknown, and the '(flag/count, value) pairs' reading is speculative — the values do not split into a clean flag/value pairing, so treat only the raw 14-u32 layout as established.
+- **Notes:** A short constant list of default numeric preferences (companion to 0x103e) that PT writes byte-identically every session → transplantable verbatim; not a computed/per-session field. **HIGH** on the exact byte layout, size, occurrence (1/session), parent (0x1040), and 4th-child position — all verified byte-identical over 19 sessions across ≥2 named sessions (DWTS, DOPE) with a brute-force-checked parent index; **LOW/UNRESOLVED** on the semantic label of each value (the pairing interpretation from the original proposal is not supported and was removed).
+- **Confidence:** high (layout/size/placement); low/unresolved for per-value semantics.
+
+### 0x2047 — Top-level session boolean-settings leaf
+
+- **Kind:** LEAF (0 children, all 19). Parent: ROOT — top-level, NOT enclosed by any 0x5A block (0 enclosing blocks in all 19); a direct child of the implicit session root. block_type u16@z+1 = 0x0002 (all 19). In ROOT/top-level start order the sequence is invariant: 0x1040 group → 0x104d → 0x207e (size 5) → 0x2047 → 0x2049 → 0x206e → 0x2073 (track region). The block immediately before is 0x207e; immediately after is 0x2049.
+- **Size:** FIXED. size field (u32@z+3) = 10, payload = 8 bytes, full span = 17 bytes ([z, z+9+8)). Exactly one instance per session (19/19).
+- **Fields (payload-relative, +0 = z+9):**
+  - `+0 u8 = 0x00` (const, 19/19).
+  - `+1 u8 = boolean session flag`: 0x01 in 16/19, 0x00 in 3/19 (Bianca Long Road, Let Her Go_Stanaj, Quality Time). The ONLY byte that ever varies. Does NOT correlate with session size/track count (Bianca=0 has 26684 blocks; Quality Time=0 has 1618; COGNAC/Never Will Marry =1 are small) — a genuine independent per-session on/off setting.
+  - `+2..+6 u8 = 0x00` (const, 19/19; reserved).
+  - `+7 u8 = 0x01` (const, 19/19; a fixed terminator/enable byte).
+- **Notes:** A small fixed-size top-level block holding one session-wide on/off flag (plus constant framing), sitting in the global-settings cluster between the 0x1040 preferences group and the track region. **HIGH** on layout, size, kind, parent, ROOT ordering, and on +1 being the only varying byte (all byte-exact across 19 non-Hipsters sessions, many distinct sessions); **LOW-TO-MEDIUM** on the UI/semantic MEANING of the +1 flag — demonstrably a per-session boolean that varies independently of session structure, but WHICH view/preference it gates is NOT pinned from the binary alone. Treating it as a display/behavior toggle PT owns is a reasonable inference, not a confirmed schema.
+- **Confidence:** high (layout/structure/ordering; +1 as sole varying byte); low-to-medium for the +1 flag's semantic meaning.
+
+### 0x2049 — Top-level session numeric-settings leaf
+
+- **Kind:** LEAF (block_type u16@z+1 = 0x0002; no children in any of 19 instances). TOP-LEVEL, not nested: span-containment enumeration finds NO containing block in all 19 — there is no explicit ROOT wrapper block that holds it. In raw stream order invariably preceded by 0x2047 and followed by 0x206e (19/19), so it sits in the global-settings cluster before the track/media region.
+- **Size:** FIXED: size field = 22, payload = 20 bytes (span = [z, z+7+22] = z..z+29). Exactly ONE per session. Byte-identical across all 19 corpus sessions (Hipsters excluded — did not load).
+- **Fields (payload-relative):**
+  - `+0 f64 = -48.0` (LE bytes `00 00 00 00 00 00 48 c0`; IEEE-754 u64 = 0xC048000000000000) — INVARIANT — inferred dB display/metering floor.
+  - `+8 u32 = 500` (0x000001f4) — INVARIANT — inferred range/scale constant (units unknown).
+  - `+12, 8 bytes = 00 00 00 00 00 00 00 00` (reserved/zero) — INVARIANT.
+- **Notes:** Holds an invariant f64 = −48.0 (almost certainly a dB display/metering floor) plus an invariant u32 = 500 (a range/scale constant). Written byte-identically in every session; carries no per-session information, so it is transplantable verbatim. CORRECTIONS to the proposed entry: (1) it is a genuine top-level block with NO containing block — there is no ROOT container wrapping it; (2) the proposed f64 hex '0x4000000000000c000' was a malformed typo — the correct IEEE-754 u64 is 0xC048000000000000. **HIGH** on layout, size, singleton-ness, ordering (prev=0x2047, next=0x206e), and byte-level constancy (19/19, distinct-payloads count = 1, ≥2 distinct session families); **LOW-TO-MEDIUM** on semantics — −48.0-as-f64 is a clean tell for a double and −48 dB a plausible metering floor, but because the value NEVER varies there is nothing to correlate it against, so the exact PT setting name and the meaning/units of the 500 are inferred, not proven.
+- **Confidence:** high (layout/constancy/ordering); low-to-medium for semantics.
+
+### 0x104a — Fixed 4-byte constant leaf (session-preferences group)
+
+- **Kind:** LEAF (block_type=1; no children in all 19 enumerated sessions). Parent: 0x1040 (block_type=4 preferences container, a top-level block). In the 0x1040 fixed immediate-child run, 0x104a sits at position 6 of 9: right after a 0x1041 and right before 0x104b. NOTE (corrected): the preceding 0x1041 is NOT a 6-byte leaf — it is block_type=2, size=97 (size=862 in one session), carrying the '<groove saved with session>' groove payload. Only the following 0x104b is an identically-shaped 6-byte leaf.
+- **Size:** FIXED: size field = 6, payload = 4 bytes (payload_len == size−2). Exactly one per session, byte-identical across all 26 sessions (19 via full block enumeration + 7 Hipsters via raw signature `5A 01 00 06 00 00 00 4A 10 01 01 00 00`).
+- **Fields (payload-relative):**
+  - Payload = `01 01 00 00` (constant in all 26 sessions).
+  - `+0 u8 = 1`; `+1 u8 = 1`; `+2 u16 (LE) = 0` (equivalently +0 u16 LE = 0x0101, +2 u16 LE = 0).
+- **Notes:** A fixed 4-byte constant leaf inside the session-preferences group (0x1040); PT writes `01 01 00 00` identically in every session (all 26 corpus files, incl. the 7 Hipsters) → transplantable verbatim. Likely a small enable/flag+version pair, but because it is invariant this is unfalsifiable from static data; whether PT recomputes it as view/display state cannot be determined without a live-PT round-trip. Its sibling 0x104b is an identically-shaped 6-byte leaf with the identical 01 01 00 00 payload. **HIGH** on layout and constancy (size=6, block_type=1, LEAF, parent 0x1040 bt=4, sibling order 103d,103d,103e,103f,1041,104a,104b,104c,1041, payload 01 01 00 00 — all across 19 enumerated non-Hipsters sessions + payload signature in all 7 Hipsters, 26/26); **LOW** on distinguishing 'version' vs 'enable-flag' vs 'reserved' semantics (a 4-byte invariant; byte labels not falsifiable from static corpus data).
+- **Confidence:** high (layout/constancy); low for byte-label semantics.
