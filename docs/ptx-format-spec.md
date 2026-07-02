@@ -2073,3 +2073,615 @@ All offsets below are payload-relative (= zmark + 9), i.e. relative to the first
   - parent own tail: the LAST 2 bytes of the 0x209f payload (at payload+27 for bt1-child / payload+28 for bt2-child) = `00 00`. CONSTANT 19/19.
 - **notes:** Across the entire corpus the rect is CONSTANT (300,300,200,400) — a stored default placement rather than a user-moved window; this is view-state, not session data. CORRECTIONS from proposal: (1) the geometry (x,y,w,h) is owned by the CHILD 0x2011, not the parent 0x209f (parent contributes no fields before the child, only a trailing `00 00` after it); (2) the 31-vs-32 split is because the child's block_type (1 vs 2) makes the child tail 2 vs 3 bytes, not '+1 = child bt' as a counter; (3) parent block_type is a true CONSTANT 1; (4) the child 0x2011 is a leaf (no grandchildren).
 - **confidence:** HIGH for structure and constants (19/19 distinct-project sessions). MEDIUM on the semantic claim that (300,300,200,400) is 'PT's default rect that PT recomputes' — the geometry is empirically invariant, but the corpus is too narrow (no session ever moved this window) to prove PT recomputes vs. merely persists a stored default. Treat as fixed view-state, not session data.
+
+### Additional types — tiers 91+ (remaining real types)
+
+### 0x206b — Editor/UI window geometry rect (view-state)
+
+- **Kind:** CONTAINER — exactly one immediate child, a 0x2011 geometry LEAF that fills the entire parent payload (child_end == parent_end; parent has zero own trailing bytes, 19/19). Own block_type=1. Parent = ROOT/top-level (19/19).
+- **Size:** Exactly 1 per session (19/19 non-Hipsters). span=36 (size_field=29) when the session-wide 0x2011 format tag is block_type=1 (13 sessions); span=37 (size_field=30) when block_type=2 (6 sessions). The +1 comes entirely from the child 0x2011 payload's trailing zero-pad run (3 bytes for bt=2 vs 2 for bt=1); parent header/layout otherwise identical.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0..+8` (9 B): child 0x2011 block header — `5A`, child_bt u16@+1 (session-wide format tag, 1 or 2), child_size u32@+3 (20 for bt=1, 21 for bt=2), child content_type u16@+7 = 0x2011.
+  - `+9` u32: window x (left). Values seen: 10, 63, 200, 202. (= child-payload +0)
+  - `+13` u32: window y (top). Values seen: 46, 200, 209. (= child-payload +4)
+  - `+17` u32: window width. Values seen: 115, 374, 420 — always a real size, never 1. (= child-payload +8)
+  - `+21` u32: window height. Values seen: 73, 276. (= child-payload +12)
+  - `+25..+26` (2 B): child 0x2011 payload trailing zero-pad; 0x00 in all 19. Meaning UNKNOWN — every observed value is 0, so cannot be shown to be semantic flags vs. plain padding (do NOT label as shown/expanded flags).
+  - `+27` (1 B, present ONLY when child_bt=2): a third trailing 0x00 of the child payload; part of the same all-zero pad run, driven by the session-global bt=2 format tag, not a per-window field.
+- **Notes:** Fixed member of an ordered top-level window family (0x206c, 0x258f, 0x259b, 0x259c, [0x206b], 0x2068, 0x2069, 0x2595) confirmed 19/19; constant top-level neighbors prev=0x259c, next=0x2068. Unlike siblings 0x2068/0x2069, 0x206b ALWAYS persists a real size regardless of open state (and its `+25` byte is always 0). Rect clusters: (200,200,420,276) ×8; (63,46,374,276) ×7; (202,209,115,73) ×3; (10,46,374,276) ×1 (Never Will Marry). View-state PT recomputes on load — a builder should copy a donor rect verbatim rather than compute it.
+- **Confidence:** HIGH on structure and geometry offsets (single 0x2011 child, ROOT parent, neighbors, family run, one-per-session, own bt=1, x/y/w/h at payload +9/+13/+17/+21). LOW on the meaning of the trailing bytes at +25/+26/+27 (always 0x00, indistinguishable from padding). MEDIUM on which specific PT window this maps to (cannot be resolved from bytes).
+
+### 0x2068 — Collapsible editor/UI window geometry (view-state)
+
+- **Kind:** CONTAINER — exactly one immediate child, a 0x2011 geometry LEAF that fills the parent payload with zero parent-own trailing. Own block_type=1. Parent = ROOT/top-level (19/19). Consistent neighbors: prev sibling 0x206b, next sibling 0x2069 (19/19).
+- **Size:** Exactly 1 per session (19/19). Keyed by the session-wide 0x2011 format tag (child_bt): child_bt=1 → size_field=29, span=36 (13 sessions); child_bt=2 → size_field=30, span=37 (6 sessions). The +1 span for child_bt=2 is a single trailing 0x00 inside the child payload. Same shape as siblings 0x206b/0x2069.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (9 B): child 0x2011 header — `5A`@+0; child_bt u16@+1 (1 or 2, matches session-wide tag); child_size u32@+3 (20 for bt=1, 21 for bt=2); child content_type u16@+7 = 0x2011. Child payload begins at +9.
+  - `+9` u32: window x (left) — live pixel coord; observed 53..871.
+  - `+13` u32: window y (top) — live pixel coord; observed 34..621 (NOT limited to 34–57).
+  - `+17` u32: window width — real when shown, else exactly 1 (collapsed).
+  - `+21` u32: window height — real when shown, else exactly 1 (collapsed); when collapsed BOTH w and h are 1, never just one (15/19 collapsed).
+  - `+25` u8: shown/expanded flag FOR THIS RECORD TYPE — =1 exactly when a real rect is stored (w,h≠1) [4/19]; =0 when collapsed to (x,y,1,1) [15/19]; perfect correlation within 0x2068. Record-type-specific, NOT a universal 'rect present' bit (sibling 0x206b always stores a real rect yet has this byte =0).
+  - `+26` u8: secondary flag = 0 in all 19.
+  - `+27` u8: trailing 0x00 — present ONLY when child_bt=2 (last byte of the child payload; child payload is 18 B for bt=1, 19 B for bt=2). Absent when child_bt=1.
+- **Notes:** Same window-geometry family as siblings 0x206b/0x2069; 0x2068 (like 0x2069) collapses to (x,y,1,1) when hidden and stores a real rect when shown. When hidden, PT stores only the anchor (x,y) with w=h=1. Geometry lives in the child 0x2011 payload = parent-payload+9 = zmark+18. child_bt equals the session-wide 0x2011 block_type (each session uses one 0x2011 format). Do NOT read +25 as a global 'has-rect' bit (0x206b is a documented counterexample). View-state, not authored data.
+- **Confidence:** HIGH on structure and on the +25 shown-flag ↔ geometry correlation WITHIN 0x2068 (4 real-rect flag=1 vs 15 collapsed flag=0, exact across 19). MEDIUM on the exact PT window identity and on generalizing +25 beyond 0x2068 (0x206b is a counterexample).
+
+### 0x2069 — Collapsible editor/UI window geometry, sibling of 0x2068 (view-state)
+
+- **Kind:** CONTAINER — exactly one immediate child, a 0x2011 geometry LEAF. Own block_type=1. Parent = ROOT/top-level (19/19). Root-level siblings consistent: prev=0x2068, next=0x2595 (19/19).
+- **Size:** Exactly 1 per session (19/19). span=36 (child block_type=1, child payload 18 B, 13 sessions) or span=37 (child block_type=2, child payload 19 B, 6 sessions). Parent's own block_type=1 in all 19. No parent-own trailing (child begins at parent-payload+0 = z+9, child_end == parent_end).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (9 B): child 0x2011 header — `5A`@+0; child block_type u16@+1 (1 → child_size 20; 2 → child_size 21); child_size u32@+3; content_type u16@+7 = 0x2011.
+  - `+9` u32: window x (left). Observed {284, 672, 722, 739, 753, 802}.
+  - `+13` u32: window y (top). Observed {38, 39, 84, 321}.
+  - `+17` u32: window width. Real when shown, else 1. Observed real widths = 89 (2 instances).
+  - `+21` u32: window height. Real when shown, else 1. Observed real heights = 502, 572.
+  - `+25` u8: shown/expanded flag = FIRST trailing byte of the child 0x2011 payload (child-payload+16). =1 iff real rect stored (w≠1 or h≠1); =0 iff collapsed to (x,y,1,1). Perfect correlation: (0,collapsed)×17, (1,expanded)×2.
+  - `+26` u8: second trailing byte = 0 in all 19 (reserved).
+  - `+27` u8: third trailing byte, present ONLY when child block_type=2 (payload 21 B; 6/19), always 0. Tracks child block_type/payload length, NOT shown state — reserved/padding.
+- **Notes:** Immediately adjacent to and structurally identical to sibling 0x2068. Stores a rect plus a shown/expanded flag; collapses to (x,y,1,1) when the window is not shown. The +25/+26/+27 bytes ARE the child 0x2011 payload's trailing bytes (child-payload+16/+17/+18), not separate parent fields. Cluster: raw block (x=284,y=84) appears 7× (6 collapsed to 1,1 + 1 expanded to 89×502); (753,321,1,1) appears 4×. PT-recomputed view/display state; do not treat as authored content.
+- **Confidence:** HIGH on structure and on the +25 shown-flag correlation (upgraded from the 2-sample 0x2069 evidence by the corroborating expanded cases in the structurally identical sibling 0x2068). MEDIUM on the exact PT window identity.
+
+### 0x258f — Default-anchor window pane (view-state)
+
+- **Kind:** CONTAINER — exactly one immediate child 0x2011 (geometry LEAF) that fills the entire parent payload (zero parent-own trailing, 19/19). Own block_type=1. Parent = ROOT/top-level. Structural top-level neighbors: prev=0x206c, next=0x259b (19/19). NOTE: in the raw size-ordered block list the immediate index-neighbors are the 0x2011 geometry CHILDREN of the adjacent windows, not those windows themselves.
+- **Size:** Exactly 1 per session (26/26, INCLUDING all 7 huge Hipsters sessions). True on-disk block length = own_size + 7 = 36 B (child_bt=1, child_size=20) or 37 B (child_bt=2, child_size=21). child_bt=1 vs 2 split = 20:6 over the full corpus (13:6 in the 19-session subset). No parent-own trailing. CONVENTION NOTE: `_raw_block_bounds` returns an `end` pointing AT the following block's 0x5A marker, so `e - z + 1` reads as 37/38 — the extra byte belongs to the next block.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (9 B): child 0x2011 header (`5A`@+0; child block_type u16@+1 = 1 or 2; child size u32@+3 = 20 or 21; content_type u16@+7 = 0x2011). Verified 26/26.
+  - `+9` u32: x = 45 in all 26 (fixed default window anchor X).
+  - `+13` u32: y = 45 in all 26 (fixed default window anchor Y).
+  - `+17` u32: width = 0 in all 26.
+  - `+21` u32: height = 0 in all 26.
+  - `+25` u8 = 0 in all 26 (constant flag; semantic unconfirmed).
+  - `+26` u8 = 1 in all 26 (constant 'valid/present'-looking flag; semantic unconfirmed) — the LAST owned byte when child_bt=1 (length 36).
+  - `+27` u8 = 0x00, present ONLY when child_bt=2 (extra child-payload byte, length 37); when child_bt=1 the 0x5A read there belongs to the NEXT block.
+- **Notes:** The plain member of the 0x258f/0x259b pair — same 0x2011 child as 0x259b but WITHOUT 0x259b's ~24-byte trailer (60−36 = 61−37 = 24). Represents a never-user-resized / purely-flag window pane; geometry constant (45,45,0,0). Constant across the corpus, copyable verbatim; treat as PT-owned display/view-state.
+- **Confidence:** HIGH on structure and byte layout: geometry (45,45,0,0) and flags (0,1) hold across all 26 sessions; single 0x2011 child, ROOT parent, 0x206c/0x259b neighbors, own bt=1, and every field offset/width reproduce exactly. MEDIUM on semantics: meaning of the two flag bytes and why child_bt differs is unproven (view-state PT owns).
+
+### 0x259b — Window/panel anchor record with 24-byte config trailer (view-state)
+
+- **Kind:** CONTAINER (own block_type=1) with exactly one immediate child (0x2011 geometry LEAF) followed by the parent's OWN 24-byte trailing config blob (not a child block). Parent = ROOT/top-level (19/19). Byte-adjacent siblings: prev=0x258f, next=0x259c (19/19) — the three form a contiguous panel-record group.
+- **Size:** Exactly 1 per session (19/19). span=60 (size_field=53) in 13 sessions; span=61 (size_field=54) in 6 sessions. Own block_type=1 always. The +1 byte is the child 0x2011's container block_type: child_bt=1 (child_size=20) → span-60; child_bt=2 (child_size=21, one extra trailing null in the child payload) → span-61. child_bt is a session-WIDE format-version tag shared by 0x258f/0x259b/0x259c (bt=2 sessions: 4 DWTS files, MANOLITO, THE WIND).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (9 B): child 0x2011 header — `5A`; child_bt u16@+1 (=1 span-60 / =2 span-61); child_size u32@+3 (=20 / =21); child_ct u16@+7 = 0x2011. Child payload begins at +9.
+  - `+9` u32: x (geometry) = 45 (15/19) or 0 (4/19).
+  - `+13` u32: y (geometry) = 45 (15/19) or 0 (4/19); (x,y) move together: (45,45) or (0,0).
+  - `+17` u32: width = 0 in all 19.
+  - `+21` u32: height = 0 in all 19.
+  - `+25` u8 = 0 in all 19 (part of the child payload).
+  - `+26` u8: valid-position/anchor flag = 1 when 0x259b's OWN (x,y)=(45,45) [15/19], = 0 when (0,0) [4/19] — perfect correlation with 0x259b's OWN geometry (NOT with 0x258f). Last byte of the child payload in span-60 (child_bt=1).
+  - `+27` u8 = 0, present ONLY in span-61 (child_bt=2) as the child 0x2011's extra trailing null (child's last byte, not a parent field). In span-60, payload+27 is instead the first byte of the 24-byte trailer.
+  - **trailer:** child block ends at payload+27 (span-60) or payload+28 (span-61); the parent's OWN 24-byte config blob begins there and runs to block end. BYTE-IDENTICAL across all 19: `00 01 00 01 01 00 00 01 01 01 01 03 00 00 00 01 00 00 00 00 05 00 00 00`.
+- **Notes:** NOT the same anchor as 0x258f — 0x258f is (45,45,0,0) in ALL 19 and never takes the (0,0,0,0) variant; only 0x259b takes (0,0,0,0) (4 sessions: COGNAC, Let Her Go, Quality Time, THE WIND). The span-60/61 split is a session-wide container-format version tag, not part of 0x259b's config trailer. To synthesize, copy the whole block verbatim from a donor whose child_bt matches. Pure display/view-state PT recomputes.
+- **Confidence:** HIGH on structure — 24-byte trailer byte-identical in all 19; geometry offsets, +25=0, +26 flag, the (45,45)/(0,0) split (15/4) and its correlation with own geometry, and the container shape all hold 19/19. MEDIUM-LOW on the MEANING of individual bytes inside the 24-byte blob (opaque constant; the '3,1,5' u32 reading is not cleanly aligned and is speculative).
+
+### 0x242f — Zero-valued session/view-state scalar (LEAF)
+
+- **Kind:** LEAF — no children (0/26 have any 0x5A child). Parent = ROOT/top-level (26/26). Own block_type=1 (26/26). Prev top-level sibling is always 0x202e. Next top-level sibling is 0x2030 (13/19) or 0x271a (6/19) — this split is NOT a property of 0x242f: next=0x271a exactly when the session contains a top-level 0x271a block (6 sessions); every session has a 0x2030.
+- **Size:** Exactly 1 per session (26/26, incl. all 7 huge Hipsters). span=13, size_field=6, payload length=4 in all 26. size(6) = content_type(2 B @ z+7) + payload(4 B @ z+9). Framing verified: z+7+size == block end (z+13).
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0` u32 = 0 in all 26 (constant zero scalar; payload hex `00000000` in every session, Hipsters included).
+- **Notes:** Appears once per session immediately after the top-level 0x202e block. The next-sibling split tracks a session-wide feature (presence/absence of a top-level 0x271a block), not this block. Simplest of this cluster — a fixed 4-byte zero payload with no children. Safe to emit verbatim as a constant; do not infer a live counter.
+- **Confidence:** HIGH on structure and constancy (payload u32=0, size=6, bt=1, LEAF with 0 children, ROOT parent, prev sibling 0x202e — all exact across 26 sessions, verified two ways: raw frame reads and interval-stack nesting). LOW on semantics — value is 0 in every session (incl. the largest), so the field's true meaning cannot be determined from this corpus.
+
+### 0x206d — View-scale ladder pair (LEAF)
+
+- **Kind:** LEAF (top-level body block, no enclosing 0x5A parent; 0 child frames). Parent=None and n_children=0 for all 26.
+- **Size:** Fixed. size_field (u32@z+3) = 90 for all 26; block span = z..z+7+size = 97 bytes; payload (z+9 to end) = 88 bytes, laid out 4+40+4+40. block_type (u16@z+1) = 0x0003 invariant across all 26.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32: count1 = 5 (element count of array A; literally `05 00 00 00` in every instance).
+  - `+4` f64[5]: array A — strictly-descending ladder, e.g. [3200, 1610, 270, 28, 0.0625]; last element always 0.0625 (=1/16) across all 26; DWTS family scales the whole array up, e.g. [819200, 51200, 1423.24, 224, 0.0625] (element [2] is a real fraction, so A is not all-integer).
+  - `+44` u32: count2 = 5 (element count of array B; literally `05 00 00 00`).
+  - `+48` f64[5]: array B — a second strictly-descending ladder, e.g. [139200, 70035, 11745, 1218, 2.71875]; last element is 2.7 (18/26) or 2.71875 (8/26). B is NOT a fixed scalar multiple of A: per-element B/A ratio is uniform (43.5) ONLY in the Reverse Rewire baks + Never Will Marry; in the other families the ratio varies element-by-element.
+- **Notes:** Two parallel 5-element f64 arrays forming descending 'ladders' — consistent with an Edit-window horizontal-zoom / samples-per-view preset ladder plus a companion scale array. arrA[0] tracks timeline extent (DWTS long-timeline → 819200; typical music → 3200 or 8623), so PT recomputes this from the current view. Most of the ladder is a shipped default (arrA[1:] has only 2 distinct tails, arrB[1:] only 3) with the leading element(s) tracking the session. The PT-safe schema: two u32 counts of 5, two strictly-descending f64[5] arrays, 88-byte payload, block_type 0x0003, top-level LEAF, one per session. Do NOT hand-author exact values.
+- **Confidence:** HIGH on structure (size / kind / children / parent / count fields / offsets / widths and the f64[5]+f64[5] layout identical 26/26). LOW on semantics — the labels 'samples-per-view' and 'companion scale' are INFERRED (no ground-truth mapping); the earlier 'arrB/arrA constant-ratio coupling' claim is FALSE for most sessions (only 8/26 show a constant 43.5).
+
+### 0x208f — Fixed 21-byte constant tail-settings record (LEAF)
+
+- **Kind:** LEAF, top-level body block. No block starts strictly inside any instance; every instance is top-level (parent content_type = None). Preceding top-level sibling is ALWAYS 0x1049; following sibling is 0x2302 or 0x209e (session-dependent). block_type = 0x0002.
+- **Size:** Declared size u32@z+3 = 23 (0x17). Full block frame (z .. z+7+size) = 30 bytes. Payload (z+9 to end) = 21 bytes. 21/21 sessions byte-identical. Frame header byte-identical in every session: `5a 02 00 17 00 00 00 8f 20`. Exactly one instance per session.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0..+20` (21 B): constant payload — `01 00 00 00 00` tiled ×4 then a trailing `01`, i.e. byte 0x01 at payload offsets 0, 5, 10, 15, 20 and 0x00 everywhere else. Single distinct payload across all sessions.
+  - **MEANING UNVERIFIED:** the field WIDTHS/OFFSETS above are one self-consistent tiling of the constant payload, but because the payload NEVER varies there is NO evidence to distinguish '5× u8 enable-flag + 4× u32 value' from 'u32 count=1 then a fixed 17-byte body' from any other packing. Do NOT treat the flag/value/record-N labels as established — they are conjecture.
+- **Notes:** Immediately follows the 0x1049 block in every session. Likely a view/window or global enable-state constant PT writes and recomputes, but this is a plausible guess only. Safe to emit the 21-byte payload verbatim when synthesizing; do not rely on any per-field semantic interpretation.
+- **Confidence:** HIGH for existence, block_type=0x0002, size=23, 21-byte byte-identical payload, LEAF status, and placement after 0x1049 (verified across 19 non-Hipsters + 2 spot-checked Hipsters = 21 sessions). LOW for the internal field semantics — unconfirmable because the payload is invariant.
+
+### 0x2302 — Count-prefixed list of 0x2301 (CONTAINER)
+
+- **Kind:** CONTAINER of 0x2301 (immediate child content-type 0x2301 when non-empty); degenerates to a bare LEAF (count only) when count=0. Parent = NONE — top-level. block_type = 0x0001 (all sessions, incl. the huge Hipsters session). Followed by top-level sibling 0x230a; preceded by 0x209e or 0x208f.
+- **Size:** Exactly one 0x2302 per session. block size(u32@z+3)=6 → 4-byte payload when empty (count=0): 18/20 sessions. size=38 → 36-byte payload when count=1: 2/20 sessions (COGNAC, THE WIND). Grows by one inline 0x2301 frame (32 bytes: 9 header + 23 payload) per element. (Denominator = 20 distinct sessions here.)
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32: count = number of 0x2301 elements (0 → empty list, no further bytes; 1 → exactly one inline 0x5A frame follows). Only 0 and 1 observed.
+  - `+4` (32 B, only when count≥1): inline 0x2301 block — standard `5A` frame with block_type=0x0001, size=25 (0x19), content_type=0x2301, then 23-byte payload. Present only in the 2 non-empty sessions; both byte-identical.
+- **Notes:** A view/selection-state list PT populates on demand (recomputed display state, not authored data) — the two non-empty instances are byte-identical, looking like a fixed PT-generated default. The inline 0x2301 payload (23 B: `1300000000000d0000005a000100000006000100000000`) begins u32=19 (0x13), then `0000`, then u32=13 (0x0d), then bytes that resemble but do NOT cleanly parse as a nested 0x5A frame. 0x2301's interior is genuinely UNDER-SAMPLED (n=2, identical) and only partially decoded.
+- **Confidence:** HIGH — the outer 0x2302 schema (count-prefixed list of 0x2301) is solidly confirmed across all 20 sessions. The 0x2301 element type is reported but its interior is not reliably field-mapped.
+
+### 0x2305 — Always-empty count-prefixed list (LEAF in practice)
+
+- **Kind:** LEAF in practice (count u32 = 0 → zero child frames in all 19 instances). Structurally a count-prefixed CONTAINER, parallel to the confirmed-non-empty 0x2302. Parent = None (top-level). block_type = 0x0001 (all 19). Positioned immediately after a 0x230b block and immediately before a 0x20a0 block in every session.
+- **Size:** size field (u32@z+3) = 6; block span = 13 (span = 7 + size); payload = 4 bytes (payload len = size − 2). Frame byte-identical across all 19: `5a 01 00 06 00 00 00 05 23 00 00 00 00`. Exactly one per session.
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0` u32: count = 0 in all 19 (empty list; when >0 this would be followed by that many inline child block frames, by analogy to the confirmed 0x2302 count-prefix behavior).
+- **Notes:** Never observed non-empty, so its own semantics can't be disambiguated directly; but the adjacent 0x2302 (same block_type 0x0001, byte-identical empty frame) IS observed non-empty with a valid inline 0x2301 child, confirming the leading u32 is a count prefix and supporting 'empty count-prefixed container' over 'flag'. Likely display/view-state PT recomputes. When synthesizing, emit the whole frame `5a 01 00 06 00 00 00 05 23 00 00 00 00`.
+- **Confidence:** HIGH on structure (size=6, span=13, payload 4 bytes, count=0, block_type=0x0001, LEAF/0 children, parent=None) verified across all 19 loadable non-huge sessions (~11 distinct projects). Container-vs-flag interpretation of the count prefix is supported indirectly via 0x2302.
+
+### 0x1049 — Zeroed count-prefixed tail-settings state (LEAF)
+
+- **Kind:** LEAF (no child frames; count/value=0). Parent = None (top-level; not nested in any session). block_type (u16@z+1) = 0x0002 (26/26, distinguishing it from the nearby 0x2305 which is block_type 0x0001).
+- **Size:** declared size u32@z+3 = 6 in all 26; payload = size−2 = 4 bytes; FULL FRAME SPAN = 13 bytes = [z, z+13] (9-byte header: `5A` + block_type u16 + size u32 + content_type u16, then 4-byte payload). Exactly one instance per session.
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0` u32: count/value = 0 in all 26 sessions (payload `00 00 00 00`).
+- **Notes:** In the tail settings/view-state region. 0x208f is the EXACT immediate successor (+1) in all 26; the immediate predecessor is 0x258e or 0x2083 (NOT 0x2510, which is ~8–9 blocks upstream), and 0x2305 is ~52–53 blocks downstream. A LEAF placeholder — either an empty list (count=0) or a zeroed scalar setting; the two cannot be distinguished because the value is never non-zero. Consistent with PT-emitted session view/preferences state PT recomputes.
+- **Confidence:** HIGH on structure (verified 26/26: one per session, size=6/payload 4/span 13, block_type=0x0002, LEAF, top-level, payload all-zero). Semantics of the u32 unconfirmed (only its always-zero value is); 'empty-list vs zeroed-scalar' ambiguity is retained honestly.
+
+### 0x2550 — Fixed all-zero head-of-tail-cluster default (LEAF)
+
+- **Kind:** LEAF (no 0x5A child frames; 0 immediate children in all 26). block_type u16@z+1 = 0x0001 (26/26). Top-level: no enclosing 0x5A block (26/26). Immediately preceded by a top-level 0x2030 (end==z, 26/26) and immediately followed by the top-level 0x2597 view-settings block (start==e, 26/26).
+- **Size:** Fixed. Declared size u32@z+3 = 9 (26/26). Total frame span = 7 + size = 16 bytes. Payload = span − 9 = 7 bytes (unusual odd length). Full frame always: `5a 01 00 09 00 00 00 50 25 00 00 00 00 00 00 00`. Exactly one instance per session.
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0..+6` (7 B): all zero — `00 00 00 00 00 00 00` in ALL 26 sessions. No non-zero field ever observed, so internal field boundaries are UNRESOLVABLE from static data. Report as a 7-byte fixed default, not a decoded schema (could be 7 packed flag bytes, or u32+3 reserved, etc. — indeterminate).
+- **Notes:** Sits at the head of the tail view/display-state cluster, immediately before 0x2597. Because the payload is all-zero everywhere, emit as 7 zero bytes when synthesizing. The view-state role is INFERRED from placement next to documented view-state blocks (0x2597/0x2588/0x258c), NOT directly proven for 0x2550 itself.
+- **Confidence:** HIGH that it is a fixed 32... — HIGH that it is a fixed 7-byte all-zero, block_type=0x0001, span-16 record occurring once per session (verified 26/26 across ≥2 projects). LOW on any internal field meaning (undeterminable because every instance is all-zero).
+
+### 0x20a0 — Timeline/edit view-state root container
+
+- **Kind:** CONTAINER (exactly 1 immediate child, content_type 0x20a1, fully nested). Parent = ROOT (top-level; the preceding on-disk block is an unrelated 0x2305 size-6 block, not a parent). block_type=0x0001.
+- **Size:** Fixed. Header size field (u32@z+3) = 0x41 = 65; that 65 counts the content_type word (2) + payload (63), so the actual parent payload is 63 bytes and the whole block span is [zmark, zmark+72]. Exactly 1 instance per session (19/19 non-Hipsters).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u16: per-session view-state scalar (NOT constant). Observed: 0x0000 (6 sessions), plus 0xd53c, 0xd61c, 0x6a00, 0x5c00, 0xd54c (×2), 0x2200 (13 sessions nonzero total). Independent of the preceding block. Meaning undecoded; likely a horizontal scroll/zoom position or edit-cursor sub-value.
+  - `+2 .. +62`: embedded child block 0x20a1 begins at zmark+11. Child header = `5A 01 00 | 36 00 00 00 | A1 20` (block_type=0x0001, size=0x36=54, content_type=0x20a1). Child span = [zmark+11, zmark+72] (consumes the rest of the parent). Child payload (52 bytes) is a run of little-endian u16 view-state values (e.g. [1024,1024,256,0,…,256,1]); several vary per session and are also opaque view state.
+- **Notes:** Root container for session-level timeline/edit view-state (zoom/scroll/selection). Holds a small 2-byte scalar of its own, then wraps exactly one 0x20a1 leaf that carries the bulk of the view/selection state. The earlier proposal's claim that the 2 bytes after the ct word are 'always 00 00' is FALSE — 00 00 in only 6/19, nonzero per-session u16 in 13/19. Display/view state PT recomputes; do NOT rely on the inner values being fixed.
+- **Confidence:** MEDIUM. Structure/offsets/child are rock-solid 19/19 (block_type=0x0001; size field=0x41; 63-byte payload; exactly 1 child of type 0x20a1 that nests fully; parent=ROOT). Downgraded because the +0 scalar and the child's u16 run are undecoded view state PT recomputes.
+
+### 0x20a1 — Timeline selection/range + view params LEAF
+
+- **Kind:** LEAF (no children in any of the 19). Parent = 0x20a0 (19/19). block_type u16@z+1 = 0x0001.
+- **Size:** Fixed: size field u32@z+3 = 54 (0x36) in all 19; payload region data[z+9:e] = 52 bytes in all 19.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u16 = 1024 (0x0400) in 18/19; 768 (0x0300) once (Bianca). Byte +0 itself always 0x00; variation is in byte +1. View/cache resolution constant.
+  - `+2` u16 = 1024 in all 19: second resolution/scale constant.
+  - `+4` u32: view width / samples-per-pixel-ish. 256 in 14/19, 537088 in DWTS family (4), 1024 in The Wind (1). Low byte +4 is ALWAYS 0x00; varying bytes are +5/+6.
+  - `+8` u8 = 0x00 (const).
+  - `+9` u8: flag = 0 or 1. ==1 EXACTLY when the +34/+42 range is nonzero (perfect correlation, 19/19: 9 ones, 10 zeros). Range-populated flag.
+  - `+10..+18` (9 B): constant `00 02 00 01 00 01 00 01 00`.
+  - `+19` u8 = 3 in 17/19; 4 in exactly 2 (Let Her Go, Quality Time). Small view-mode enum.
+  - `+20..+33` (14 B): constant `00 00 00 00 00 02 00 00 00 03 00 00 00 00`.
+  - `+34` u32: timeline range LOW / selection start (0 when unset, 10/19). Recurs byte-identically across unrelated sessions: 3906250000 (×4: Bianca, Cognac, Let Her Go, Quality Time), 3937701250 (×4 DWTS), 3906295000 (×1 The Wind). Bytes +38..+41 always 0. A PT default timeline position in internal rational units (does not divide evenly by 44100/48000), NOT a content-derived sample count.
+  - `+38` u32 = 0x00000000 (const).
+  - `+42` u32: timeline range HIGH / selection end. ALWAYS EQUAL to +34 (start==end, zero-length selection), 19/19.
+  - `+46..+51` (6 B): fixed tail `00 00 00 01 01 00` in all 19 (i.e. +46/+47/+48 = 00, +49 = 0x01, +50 = 0x01, +51 = 0x00).
+- **Notes:** Stores a saved timeline selection/range (a start==end pair, i.e. an empty/zero-length selection) plus fixed view/resolution params. Both the range and the +9 flag are 0 when the session was never given this state → display/view state PT restores or recomputes. Varying payload offsets are exactly +1, +5, +6, +9, +19 and the two u32 range fields; every other byte is constant.
+- **Confidence:** HIGH for structure/constancy (count, 1-per-session, size 54, payload 52, block_type 0x0001, parent always 0x20a0, no children — all 19/19; +34==+42 within every session). Semantic labels (view resolution, selection range, view-mode enum) remain interpretive but the display-state / PT-recomputed framing is well supported (the +34 value recurs byte-identically across unrelated projects and does not divide cleanly by any sample rate).
+
+### 0x20a2 — Fixed-size on-screen element geometry (view-state)
+
+- **Kind:** CONTAINER, parent = ROOT (parent content_type = None, 19/19). Exactly ONE immediate child: 0x2011 (19/19). No other children. Parent block_type = 0x0008 (19/19).
+- **Size:** Parent size (u32 header field) = 40 in 13/19 sessions, 41 in 6/19. The 40-vs-41 split is driven entirely by the CHILD 0x2011's block_type: child bt 0x0001 → 18-byte child payload → parent size 40; child bt 0x0002 → 19-byte child payload → parent size 41 (child trailing pad = child_bt + 1). Parent block_type is 0x0008 regardless. 1 per session, 19/19 (7 Hipsters excluded as huge).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (payload start): 0 own pre-child bytes. The child 0x2011 header begins immediately: `5A <child_bt:u16> <child_size:u32> 11 20` (9 B). child_bt = 0x0001 or 0x0002; child ct = 0x2011.
+  - `+9` u32: 'left' (varies per session; e.g. 891, 553, 437, 25, 402, 802) — INFERRED position X.
+  - `+13` u32: 'top' (varies; e.g. 673, 381, 273, 500, 79, 38) — INFERRED position Y.
+  - `+17` u32: width = 549 in ALL 19 — constant (INFERRED size W).
+  - `+21` u32: height = 100 in ALL 19 — constant (INFERRED size H).
+  - `+25`: child trailing pad — 2 zero bytes (child_bt=1) or 3 (child_bt=2); all-zero in 19/19. Ends the 0x2011 child block.
+  - **PARENT TRAILING** (11 bytes, at payload +27 for size-40 / +28 for size-41): byte[0] enum in {2,3,4} (varies); byte[1]=0x00; byte[2] enum in {1,5,6} (varies); byte[3]=0x00; byte[4]=0x00; byte[5]=0x01 (tag); byte[6] value in {0x17,0x2b,0x4b} (varies); byte[7]=0x00; byte[8]=0x01 (tag); byte[9] value in {0x00,0x08,0x33,0x3c,0x4b} (varies); byte[10]=0x00. Reads as two '01 <val> 00' tagged bytes (5–7, 8–10) preceded by two small enums (bytes 0 and 2). Meaning UNCONFIRMED (plausibly scroll/zoom or a secondary pane extent).
+- **Notes:** One small top-level block per session wrapping a single 0x2011 rectangle plus 11 trailing enum/value bytes. Rectangle's 3rd/4th u32 constant (549, 100) while 1st/2nd vary per session → a fixed-SIZE on-screen element whose POSITION PT saves. left/top labels are INFERRED (could be top,left). PT recomputes on layout; NOT structural session data.
+- **Confidence:** MEDIUM (block is display/view-state PT recomputes; the trailing enum/value semantics are unconfirmed). Structure CONFIRMED 19/19: 1-per-session, parent block_type 0x0008, single 0x2011 child at ROOT, width=549 & height=100 constant while left/top move.
+
+### 0x252a — Saved window/dialog geometry, resizable (view-state)
+
+- **Kind:** CONTAINER (single child: 0x2011); no own pre-child bytes and no trailing parent bytes (child begins at zmark+9 and child_end == block_end); parent = ROOT (top-level). Outer block_type = 0x0001 (19/19).
+- **Size:** 36-byte block (outer size field 29) OR 37-byte block (outer size field 30). The 29-vs-30 split correlates EXACTLY with the child 0x2011's own block_type: child bt 0x0001 → 18-byte payload → 2-byte '00 00' tail → outer size 29 (13/19); child bt 0x0002 → 19-byte payload → 3-byte '00 00 00' tail → outer size 30 (6/19). 1 per session, 19/19 across 6 distinct projects.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (own header/pre-child): NONE. Outer frame is `5A | block_type u16=0x0001 | size u32 (29 or 30) | content_type u16=0x252A`, then the 0x2011 child header begins immediately at zmark+9 (`5A | child_block_type u16 (0x0001 or 0x0002) | csize u32 | 11 20`).
+  - child 0x2011 payload (starts at child_zmark+9): `+0` u32 left, `+4` u32 top, `+8` u32 width, `+12` u32 height. Confirmed width/height (NOT absolute right/bottom): field3 < left in 6 instances (e.g. L=735 w=304), and field4 values of 29/32/55 are far too small to be absolute bottom coords given top=500.
+  - child 0x2011 tail after the 16-byte rectangle: '00 00' (2 B, child bt 0x0001) or '00 00 00' (3 B, child bt 0x0002). All-zero in 19/19.
+  - no parent trailing bytes: child_end == block_end (19/19).
+- **Notes:** A second, variably-sized saved window distinct from 0x20a2. Both width and height vary here (width ∈ {304,250,200,272}; height ∈ {236,29,32,200,55}) → a resizable window, whereas 0x20a2 locks width/height at 549/100. Recurring default corner [25,500,…] seen in 11/19, matching the same default-corner family as 0x20a2. PT-recomputed UI position; treat the rectangle as an opaque saved-geometry blob.
+- **Confidence:** HIGH. All structural claims hold 19/19 (exactly 1 per session, outer block_type 0x0001, parent=ROOT, single 0x2011 child, no pre-child or trailing bytes; rect layout left/top/width/height). Verified across 6 distinct projects.
+
+### 0x2428 — Session-level cross-reference / dependency link table
+
+- **Kind:** CONTAINER, parent = ROOT. Single child 0x1054; 0x1054 → N × 0x1052; each 0x1052 → M × 0x1050 (variable M, e.g. 2,3,8,72,79,169); each 0x1050 wraps exactly one 0x104f leaf. block_type of 0x2428 and 0x1054 = 0x0001. block_type of 0x1052 = 0x0002 OR 0x0003 (0x0002 in Reverse/Bianca, 0x0003 in DWTS). 0x1050/0x104f come in two size variants (see size).
+- **Size:** Reported using the block SIZE field (payload+2). Exactly 1 per session, 19/19. Empty = size 15 (total span 22 bytes): child 0x1054 size 6 with a single count=0 u32. Non-empty range: 308 (Reverse, 2 entries) up to 45645 (DWTS, 362 entries; Bianca 25698 / 15 entries). block_type 0x0001. Leaf sizes NOT fixed: SMALL variant 0x1050 size=44 wrapping 0x104f size=34 (Reverse/Bianca; 0x1050 btype 0x0001, 0x104f btype 0x0008); LARGE variant 0x1050 size=48 wrapping 0x104f size=37 (DWTS; 0x1050 btype 0x0002, 0x104f btype 0x000a).
+- **Fields:**
+  - child 0x1054 payload `+0` u32 = ENTRY COUNT; VERIFIED == number of 0x1052 sub-blocks in every session (0,2,4,15,362). 0 ⇒ empty. The 0x2428 block itself has no scalar fields of its own; its payload IS the 0x1054 child.
+  - each 0x1052 payload `+0` u32 = 1 in every record (a fixed sub-count/version marker), then M × 0x1050 sub-blocks.
+  - each 0x1050 wraps exactly one 0x104f leaf and carries no scalar fields of its own beyond that child.
+  - 0x104f leaf payload (offsets from z+9; 32 B small / 35 B large variant): `+0` u16 usually 0 (0 in 2761/2879, 1 in 118 — NOT a constant); `+2` u32 object index/id (822 distinct, range 1..4739); `+6` 8 bytes object HANDLE/ADDRESS, not a unique GUID (only 456 distinct across 2879 records, heavily reused; no 2A-00-00-00 GUID tag precedes it); `+14` u16 small enum, 6 values {0x100,0x140,0x200,0x240,0x300,0x340}; `+16` u16 mostly 0xfffe (2494/2879) but 0x0001 in 381 and rarely 0x0003/0x0005/0x0007 — NOT constant; `+18` u32 = 0 (0 in 2876, 1 in 3); `+22` 8 bytes = `0xFFFFFFFFFFFFFFFF` null-link sentinel, CONSTANT in all 2879; `+30` u16 = 0. SMALL variant ends at +32. LARGE (0x000a) variant has 3 EXTRA tail bytes at +32 that VARY (00-00-00 ×1578, 00-01-00 ×468, 00-02-00 ×48).
+- **Notes:** Root container holding a length-counted list of N binary link/cross-reference records; no printable strings. Entry count scales with session edit/clip history (0..362 across corpus), 0 in lightly-edited sessions → a session-wide dependency/link table, not a per-track structure. The 0x1054/0x1052/0x1050/0x104f family is PT's generic nested list/record container. Only the +22 8-byte 0xFF sentinel is a true constant; many earlier 'constant' claims are only majority values. Per-record semantics (what each +2 index / +6 handle points at, what +14/+16 select) are NOT pinned; may be internal edit-history/undo or object-linking state.
+- **Confidence:** MEDIUM. Structure (container nesting, 1-per-session, count==#0x1052, empty=count-0, size scaling) is CONFIRMED byte-exactly across the corpus (≥3 projects, 19 files, 2879 leaf records). Semantics are inferential.
+
+### 0x2508 — Network/host-identity record (name + IPv4)
+
+- **Kind:** LEAF (no children, 19/19). block_type 0x0007 (19/19). Top-level / parent = ROOT (19/19).
+- **Size:** Two forms. NAMED form: block span 62 bytes = 7-byte header + declared_size 55 (payload 53); occurs 12/19. EMPTY-NAME form: span 55 = header + declared_size 48 (payload 46); occurs 7/19 (Reverse Rewire family). The 7-byte delta is exactly 'name-string len 7 + "Default" (11 bytes)' vs 'name-string len 0 (4 bytes)'. Exactly 1 per session, 19/19, ≥10 distinct projects.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32 = 28283 (0x6e7b): constant head magic/type id (19/19).
+  - `+4` u32 = 28282 (0x6e7a): constant head magic (19/19).
+  - `+8` u32 = 0x00000000: const (19/19).
+  - `+12` u32 = 0xffffffff: null sentinel, const (19/19).
+  - `+16` u16 = 0x0000: const (19/19).
+  - `+18` (8 B): opaque field. All-zero in 4 sessions (DWTS family, Manolito, The Wind, DWTS-155); a non-zero pointer/handle-like value elsewhere (e.g. Reverse `80 fd 49 0c 28 03 f4 0c`). NOT a GUID (no `2A 00 00 00` tag anywhere, 19/19).
+  - `+26`: length-prefixed string (u32 len, then len ASCII). PRESENT IN BOTH FORMS. NAMED: len=7 → 'Default' (bytes +30..+36). EMPTY-NAME (Reverse): len=0 → no bytes. This length prefix is what makes the block 7 bytes shorter in the Reverse family; the field is never actually absent.
+  - after string (+37 named / +30 empty), 4 bytes: IPv4 ADDRESS. Valid private/loopback/link-local IPv4 in every non-zero instance (192.168.1.161, 192.168.1.56 ×2, 192.168.1.209, 172.22.89.181 ×3, 169.254.221.48, 127.0.0.1, 10.0.0.13 ×3). The only all-zero post-string IP is the Reverse empty-name form.
+  - trailing bytes after the IPv4: ~10–12 varying bytes (per-session; e.g. '00 ff ff ff ff 00', '30 d9 52 d1', '28 e9 1d 00'), NOT constant. ONLY the final 2 bytes (`00 01`) are byte-constant across all 19.
+- **Notes:** A length-prefixed node/host name (literally 'Default' in 12/19) plus an embedded IPv4 that decodes as a valid address in EVERY non-zero instance → almost certainly a NETWORK/HOST IDENTITY record (host name + machine IP, e.g. a WAN/collaboration/'last saved by' node). The literal 'Default' is the host/node name, not a settings preset. The earlier 'constant 8-byte tail' claim is FALSE (only last 2 bytes constant).
+- **Confidence:** MEDIUM. Header (+0..+17) + length-prefixed name at +26 + the IPv4 immediately after are the stable, high-confidence parts, verified 19/19 across ≥10 projects. Downgraded because the precise semantics of +18 (8 bytes) and the post-IP trailing bytes are session-specific and not pinned; the network-identity role itself is a strong inference, not RE-proven.
+
+### 0x25c0 — Network/hardware peripheral node record
+
+- **Kind:** CONTAINER (exactly one child block 0x2509); top-level, no parent. Outer block_type is always 2.
+- **Size:** payload_len = size−2. Two shapes: payload 49 / size 51 / span 58 (child 0x2509 block_type=2), or payload 53 / size 55 / span 62 (child 0x2509 block_type=3). One instance per session: 26/26 (17 of the len-49 shape, 9 of the len-53 shape).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u8: flag/count = 0x01 (constant across all 26).
+  - `+1..+4` (4 B): IPv4 address in dotted-quad byte order (big-endian). Varies exactly as IP octets across 6 distinct values from ≥6 families: 192.168.1.160, 192.168.0.18, 192.168.1.56, 192.168.1.161, 10.0.0.13, 127.0.0.1. Cross-checked: the identical 4-byte IP appears in the adjacent 0x2508 record right after the ASCII 'Default' string.
+  - `+5..+8` (4 B): tag = `6c 72 00 00` ('lr\x00\x00'), constant across all 26.
+  - `+9 ..`: embedded child block 0x2509 whose 0x5A frame begins exactly at payload+9. Child span = 7+child_size = 30 bytes (child bt=2) or 34 bytes (child bt=3). Child bytes fully constant within each variant, contain no IP data. No GUID (no `2A 00 00 00` tag).
+  - **trailer** (bytes after the child to end of span): 10 bytes `00 00 00 00 00 01 01 00 00 00` (constant across all 26).
+- **Notes:** Identifies one I/O peripheral by its IPv4 plus a constant 4-byte tag. Lives in the settings tail, immediately after the 0x2508 peripheral record and adjacent to the 0x2107 I/O-setup block. The 'block_type 2 vs 3' variation is on the CHILD 0x2509, NOT the outer 0x25c0 (outer is ALWAYS 2). The payload-49-vs-53 split tracks the child block_type/size. IP decode is unambiguous (private-LAN + loopback varying per machine).
+- **Confidence:** HIGH. Verified byte-exact across all 26 corpus sessions (incl. 7 Hipsters). content_type 0x25c0, top-level/no-parent, single 0x2509 child, one-per-session, +0=0x01, IPv4 at +1..+4 (corroborated by the matching IP in 0x2508), constant 'lr' tag at +5..+8, child frame at payload+9, span 58/62, 10-byte constant trailer.
+
+### 0x2509 — Peripheral/network peer connection sub-record
+
+- **Kind:** LEAF (no children, 19/19). Parent always 0x25c0 (19/19), itself a top-level block.
+- **Size:** payload_len 21 (block_type=2) or 25 (block_type=3). 19 instances / 19 distinct sessions (one per session). block_type 2: 10 inst; block_type 3: 9 inst.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32 = 0 (constant, reserved).
+  - `+4` u32 = 0 (constant, reserved).
+  - `+8` u32 = 0xFFFFFFFF (−1 'unset ID' sentinel, constant across all 19).
+  - `+12` u8 = 0 (constant).
+  - `+13` u32 = 28283 (0x00006e7b) in bt=2, 0 in bt=3 — plausibly a peer port, NOT a channel count.
+  - `+17` u32 = 28282 (0x00006e7a) in bt=2, 0 in bt=3 — plausibly a peer port, NOT a latency count.
+  - bt=3 adds 4 trailing zero bytes at +21..+24 (payload 25 vs 21); always `00000000`.
+- **Notes:** The sole child of a top-level 0x25c0 node record whose payload begins with an IPv4. Holds a −1 'unset ID' sentinel plus, for a real LAN peer (bt=2), a near-equal u32 pair (28283/28282 — most plausibly two port numbers, also valid as u16 ports). Zeroed for loopback/unreachable nodes (bt=3). The bt=2-vs-bt=3 split correlates 1:1 with reachability: LAN peers (192.168.x) ⇒ bt=2 with non-zero pair; loopback 127.0.0.1 and 10.0.0.13 ⇒ bt=3 with the pair zeroed. Looks like Satellite Link / network-peer state PT recomputes from the host environment. CAVEAT: the bt=2 pair is observed-constant only because 8 of 10 bt=2 instances are backups of a single project — treat 28283/28282 as this user's setup, not a proven fixed default.
+- **Confidence:** MEDIUM-HIGH (byte layout HIGH; semantics LOW). Framing/offsets verified byte-exact 19/19; the +0/+4 reserved zeros, +8 sentinel, +12=0, and bt=3 zero-pad are CERTAIN. The +13/+17 port interpretation and the constancy of the pair are INFERRED, not proven.
+
+### 0x2530 — Grid/Nudge time-value display cache (edit-prefs, LEAF)
+
+- **Kind:** LEAF (block_type u16@z+1 == 0x0001; inline length-prefixed ASCII strings; ZERO child 0x5A blocks). Top-level: no parent in 26/26. Preceded by 0x25c0 (20/26) or 0x271f (6/26), always followed by 0x2516.
+- **Size:** FIXED. header size field u32@z+3 == 289; payload_len == 287; full span == 296 (= z .. z+7+289). Exactly one per session (26/26, Hipsters INCLUDED). Every string length is constant across all sessions → the whole block is a fixed 287-byte layout.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32 = 3 (record count). CONSTANT 26/26.
+  - `+4` u8: per-record display/unit format enum for record 0 (values {0x04:19, 0x00:7}); correlates with whether record0's Bars|Beats|Ticks reads whole-beats ('0| 1| 000') vs sub-beat ticks ('0| 0| 240').
+  - `+5..+6` = `00 00` (const). `+7..+10` u32 = 3 (group/record marker, const).
+  - `+11` u8: format enum (record 1; {0x00:25, 0x01:1}). `+12` u8: format enum ({0x01:17, 0x00:9}), tracks record0/1 beat-vs-tick display. `+13` = 01 const. `+14..+17` u32=3. `+18..+20` =00. `+21..+24` u32=3. (Header is a fixed 25-byte region: count + three '03 00 00 00' group markers interleaved with per-record format-enum bytes 4/11/12.)
+  - **RECORD region** (3 records, fixed 82 bytes each): rec0 @+25, rec1 @+107, rec2 @+189. Each record = u32 marker (== 5) then five length-prefixed ASCII strings with CONSTANT lengths [12,10,14,11,11]: Bars|Beats|Ticks(12), Min:Secs(10), Timecode(14), Feet+Frames(11), Samples(11).
+    - rec0 (@+25) VARIES: Samples ∈ {'100','1000','10000'}; B|B|T ∈ {'0| 1| 000','0| 0| 240'} etc.
+    - rec1 (@+107) VARIES: Samples almost always '10000' (25/26; one session '100').
+    - rec2 (@+189) CONSTANT 26/26: '   2| 0| 000' / '  0:05.000' / '00:00:05:00.00' / '   20+00.00' / '     960000' (2 bars / 5.000s / 960000 samples).
+  - **TRAILER** @+271, 16 bytes, byte-identical 26/26: `03 00 00 00 FF FF FF FF 00 00 00 00 FF FF FF FF` (u32=3 then two −1 sentinels separated by a 00000000).
+- **Notes:** THREE time-position VALUE records, each pre-rendered as fixed-width cached display strings in all five rulers. Almost certainly the session's Grid / Nudge value set — rec0/rec1 vary per session with the user's grid/nudge amount, rec2 is a hardcoded 5s/960000 default. The display STRINGS are caches PT reformats, but the LAYOUT is a RIGID fixed-offset schema. The grid/nudge role is a reasonable inference, not provable from bytes.
+- **Confidence:** HIGH on structure (one per session; block_type 0x0001; size 289/payload 287/span 296; LEAF; top-level; 3 records × 5 fixed-width ruler strings + 16-byte trailer; markers count=3, per-record=5; trailer byte-identical) — verified 26/26. The Samples column varies over {100,1000,10000}; note 240/480 are TICKS values inside the B|B|T string, never the Samples value.
+
+### 0x2516 — Reserved 32-byte all-zero placeholder slot (LEAF)
+
+- **Kind:** LEAF (0 children, 26/26); top-level (no parent, 26/26). block_type (u16@z+1) = 0x0018 (24) in 26/26.
+- **Size:** Fixed. Header byte-identical across all 26: `5a 18 00 22 00 00 00 16 25` → size(u32@z+3)=0x22 (34), payload_len = size−2 = 32, full span = 7+size = 41. Exactly one instance per session (26/26, incl. 7 huge Hipsters).
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0..+31` (32 B): 32 zero bytes in ALL 26 sessions. 0 non-zero payloads. No internal field boundaries observable (could be 8×u32, 4×u64, a zeroed GUID pair, or pure pad — indeterminate).
+  - CONTEXT (not payload): the 4 bytes immediately preceding the frame are `ff ff ff ff` in all 26 (trailing bytes of the preceding 0x2530 block).
+- **Notes:** Reserved/placeholder slot immediately following 0x2530. The successor is NOT fixed: in 20/26 sessions 0x2516 is the LAST top-level body block (ends exactly at final_index.start); only in 6/26 (DWTS family + THE WIND / MANOLITO) is it followed by 0x4400. Describe as 'immediately after 0x2530, and either the terminal top-level body block or followed by 0x4400' — do NOT assert a fixed 0x2530..0x4400 sandwich. Emit as 32 zero bytes when synthesizing.
+- **Confidence:** HIGH that it is a fixed 32-byte all-zero, block_type=0x18, span-41 record occurring once per session (verified 26/26, ≥2 projects). LOW on any internal field meaning — undeterminable because every instance is all-zero.
+
+### 0x4421 — Format/effect-category registry entry (name + type-code)
+
+- **Kind:** LEAF (no children; bisect first-child = None on all 18). block_type (u16@z+1) = 1 for every instance. Parent is ALWAYS 0x4422 (a count-prefixed registry table), itself a direct child of the single 0x2519 name-table block near the file head.
+- **Size:** block_size (u32@z+3) is one of exactly three constant values 21 / 28 / 33 (payload lengths 19 / 26 / 31; payload = block_size − 2). Exactly 3 instances per session, one of each size, always in the fixed order 21,28,33. 18 instances across 6 corpus sessions (3 truly-distinct lineages: DWTS, MANOLITO, THE WIND).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0..+3` (4 B): type-code tag (ASCII, all end in 'TP'): slot0='FCTP' (46 43 54 50), slot1='d7TP' (64 37 54 50), slot2='mATP' (6d 41 54 50). Constant across every session. Whether byte-reversed FourCC is unconfirmed (reversed forms 'PTCF'/'PT7d'/'PTAm' are not obviously meaningful) — treat as an opaque tag that happens to end 'TP'.
+  - `+4..+8` (5 B): constant `01 00 00 00 00`. Naturally read as u32 version = 1 (+4) then u8 flag = 0 (+8); the exact partition is not load-bearing (never varies).
+  - `+9`: length-prefixed ASCII string (u32 length then that many bytes) = display name: slot0 len6 'ClipFX', slot1 len13 '7.1.2 Formats', slot2 len18 'Ambisonics Formats'. No trailing bytes after the string.
+- **Notes:** A named entry in a fixed, built-in format/effect-category registry mapping a 4-byte internal type-code to a display name. Each entire payload is byte-identical across all 6 sessions per slot — a hard-coded built-in table, not per-session data. PT writes an identical 3-entry set (ClipFX + two surround/Ambisonics format groups) only into sessions from PT versions that support these features; older sessions omit the whole table. This is stable persisted data (NOT view-state PT recomputes), so a precise schema is warranted.
+- **Confidence:** HIGH. Confirmed across ≥3 distinct sessions: parent=0x4422, LEAF, tags, version/flag constants, string encoding, location in the early 0x2519 name-table region (~9–28 KB from head).
+
+### 0x259a — Window display-state wrapper (0x259a→0x2599→0x2552→0x2011 chain)
+
+- **Kind:** CONTAINER (bt=1), exactly one child 0x2599 (bt=3); subtree chain 0x259a→0x2599→0x2552(bt=2)→0x2011(bt=1). Top-level in EVERY session (parent=None). 0 or 1 per session, NEVER more than 1.
+- **Size:** Full span 61 bytes (constant, all 17). size field u32@z+3 = 54. Payload (z+9..e) = 52 = exactly the full span of the single 0x2599 child (zero trailing bytes in 0x259a). Present in 17 sessions incl. all 7 Hipsters, 7 Reverse Rewire, Bianca, Let Her Go, Quality Time.
+- **Fields:**
+  - 0x259a payload = the entire embedded 0x2599 block. 0x259a has NO scalar fields of its own before or after the child (pure wrapper), all 17.
+  - 0x2599 (bt=3): 9-byte header, one child 0x2552, then a 3-byte tail: `01 05 00` (Hipsters/Bianca/LetHerGo/QualityTime) or `01 00 01` (Reverse Rewire) — session-dependent.
+  - 0x2552 (bt=2): 9-byte header, then a CONSTANT 2-byte scalar field `28 00` (=40 u16) BEFORE the 0x2011 child (all 17), then a 2-byte tail `00 00` after the child.
+  - 0x2011 leaf payload (18 bytes) = 4 u32 LE + 2 trailing bytes: u32@+0, u32@+4, u32@+8, u32@+12. u32[0],u32[1] session-dependent (small set: (1766,781) shared by Hipsters+Bianca+LetHerGo+QualityTime; (514,247) all Reverse Rewire). u32[2]=679, u32[3]=678 CONSTANT across every session. 0x2011 trailing 2 bytes: `00 00` (Hipsters, Reverse Rewire) or `40 00` (Bianca, Let Her Go, Quality Time).
+- **Notes:** A thin outer container around exactly one 0x2599 child; the session-varying data lives 3 levels down in a 0x2011 leaf that looks like window/view geometry PT recomputes. Cluster context: top-level neighbors 0x259c 0x206b 0x2068 0x2069 0x2595 [0x259a] 0x2066 0x2071 0x2072 0x202d 0x202e, stable order in all sessions. u32[2]/u32[3] being identical (679/678) across 3 unrelated machines argues against a raw per-window pixel rectangle. Display/view-state PT recomputes.
+- **Confidence:** HIGH that 0x259a is a pure top-level wrapper (no own fields), single-0x2599-child, span 61/size 54/payload 52, chain to 0x2011, one-per-session — reproduced across 17 instances in 5 distinct session families. MEDIUM that the 0x2011 u32s are window/view geometry. LOW on any individual u32's exact pixel meaning.
+
+### 0x2599 — Floating-window geometry snapshot
+
+- **Kind:** CONTAINER — exactly one immediate child 0x2552 (17/17), which holds exactly one nested 0x2011 rect (17/17). Parent is ALWAYS 0x259a (top-level/ROOT); 0x259a contains exactly one 0x2599 (single-purpose wrapper). Own block_type=3; child 0x2552 block_type=2; nested 0x2011 block_type=1.
+- **Size:** Fixed: size_field=45, payload=43 bytes, span=52 (17/17 across every corpus session that has it: 7 Hipsters + 7 Reverse Rewire + Bianca + Let Her Go + Quality Time). Low-frequency: exactly one per session, and only 17 of 26 corpus sessions contain it. No child_bt=2 size variant observed.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0..+8`: nested 0x2552 child header — `5A 02 00` (bt=2), size u32@+3 = 0x21=33, ct u16@+7 = 0x2552.
+  - `+9` u16: 0x2552 payload leadword = 0x0028 (constant 17/17).
+  - `+11..+19`: nested 0x2011 rect header — `5A 01 00` (bt=1), size u32@+14 = 0x14=20, ct u16@+18 = 0x2011. 0x2011 rect payload starts @+20.
+  - `+20` u32: rect x (window left). VARIES but only 2 distinct values corpus-wide (1766 ×10, 514 ×7 [Reverse Rewire]) — often a shared default.
+  - `+24` u32: rect y (window top). 781 (×10) or 247 (×7).
+  - `+28` u32: rect width — CONSTANT 679 (0x2A7) across all 17.
+  - `+32` u32: rect height — CONSTANT 678 (0x2A6) across all 17.
+  - `+36` u16: flags/position word inside the 0x2011 rect payload — 0x0000 (14) or 0x0040 (3: Bianca, Let Her Go, Quality Time). Final u16 of the 18-byte 0x2011 rect payload (rect payload = +20..+38).
+  - `+38..+39`: 0x2552 trailing bytes (after its 0x2011 child) = `00 00` (constant 17/17).
+  - `+40..+42`: 0x2599 OWN trailing bytes (after the 0x2552 child, until 0x2599 payload ends) = 3 view-flag bytes, per-session: `01 05 00` (Hipsters+Bianca+LetHerGo+QualityTime, ×10) or `01 00 01` (Reverse Rewire, ×7).
+- **Notes:** A saved geometry snapshot for a floating window/pane; pure fixed-size integer geometry (no strings, no GUIDs), byte-identical across all backups of a given session. w=679/h=678 constant with variable x/y ⇒ a fixed-size window PT repositions. 0x2552 is a GENERIC reused rect/window sub-record (also appears under 0x2588, 0x258b, 0x2551, 0x2556) — do NOT over-attribute a 'browser/list' meaning. It REUSES the same 0x2011 rect sub-record as the 0x2019–0x201f window-geometry family. x/y are NOT reliably per-session-unique (only 2 distinct pairs; 4 of 5 families share (1766,781)).
+- **Confidence:** HIGH on structure/counts/parent/child/grandparent, size/span, and every header + rect offset/width (verified 17/17 across 5 distinct families, byte-decoded). MEDIUM on 'view-state geometry snapshot' semantics ('PT recomputes on save' is INFERENCE, no PT oracle). LOW on the exact meaning of the +36 flags word and the 3 own-trailing view-flag bytes.
+
+### 0x2083 — Optional all-zero placeholder record (LEAF)
+
+- **Kind:** LEAF — zero descendants (17/17). Parent = ROOT/top-level (17/17). Own block_type (u16@z+1) = 2 (17/17). STABLE slot: immediately preceded by 0x258e (span ends exactly at this block's zmark) and immediately followed by 0x1049, in all 17 instances.
+- **Size:** Fixed: size_field (u32@z+3) = 31, payload = 29 bytes (z+9..end), full span = 38 (17/17). At most ONE per session where present, and 0 where absent.
+- **Fields (offset payload-relative = zmark+9):**
+  - `+0..+28` (29 B): ALL ZERO in every one of the 17 present instances (0 non-zero payloads corpus-wide, verified by both size-driven enumeration and an independent raw signature scan `5a 02 00 1f 00 00 00 83 20`). No decodable internal structure — no length-prefixed strings, no `2A 00 00 00`-tagged GUIDs, no non-zero numerics.
+- **Notes:** OPTIONAL / not written for every session: present in 17/26 sessions and provably ABSENT (0 occurrences anywhere in the byte stream) in the other 9 (DWTS family, COGNAC, DOPE, MANOLITO, Never Will Marry, THE WIND). A synthesizer can either omit it entirely or copy it verbatim (both patterns occur in valid sessions). Consistent with a session-scoped feature/preference slot PT materializes only when that (default-off) feature slot exists, leaving it blank. Contrast with 0x209e (singleton-at-ROOT but non-zero).
+- **Confidence:** HIGH on STRUCTURE (fixed 38-byte / 29-payload all-zero LEAF at ROOT, block_type=2, fixed 0x258e→[0x2083]→0x1049 slot; 17/17 across 5 distinct projects) and on the PRESENCE PATTERN (optional, 17/26; absence raw-scan-confirmed, not a parse artifact). LOW/UNKNOWN on SEMANTICS — all-zero payload leaves nothing to decode; role is 'reserved/default-empty optional record'.
+
+### 0x209e — Session-global settings/flags record (LEAF)
+
+- **Kind:** LEAF — zero children (17/17). Parent = ROOT/top-level (17/17). Own block_type = 3 (17/17). Stable ROOT-neighbor sequence: …0x2083, 0x1049, 0x208f, [0x209e], 0x2302, 0x230a, 0x2305….
+- **Size:** Fixed: size_field=11, payload=9 bytes, span=18 (17/17). Exactly one per session where present (confirmed by size-driven enumeration AND an independent raw signature scan `5a 03 00 0b 00 00 00 9e 20`).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u8 = 0x00 (const). `+1` u8 = 0x00 (const).
+  - `+2` u8: the ONLY byte that varies corpus-wide — 0x01 in 10 instances, 0x00 in the 7 Reverse Rewire backups. Meaning UNKNOWN.
+  - `+3` u8 = 0x01 (const). `+4` u8 = 0x00 (const). `+5` u8 = 0x01 (const). `+6` u8 = 0x00 (const). `+7` u8 = 0x00 (const). `+8` u8 = 0x00 (const).
+- **Notes:** Small session-global settings/flags record, a ROOT sibling appearing between 0x208f and 0x2302. Payload alphabet is exactly two 9-byte constants: `00 00 01 01 00 01 00 00 00` (×10) and `00 00 00 01 00 01 00 00 00` (×7, Reverse Rewire only); constant within each .bak lineage → a stored session preference. NOTE: presence is itself session-dependent — 0x209e is carried by 17 of 26 corpus sessions (absent from DWTS family and others); the '17/17' figures require including the 7 Hipsters sessions.
+- **Confidence:** HIGH on structure (fixed 9-byte LEAF at ROOT, block_type=3, size_field=11, span=18, 0 children, stable neighbors) and on WHICH byte varies (+2 is the sole variable offset). LOW/UNCONFIRMABLE on the MEANING of +2 — the 17 instances collapse into only 5 distinct lineages, and the 0x00 value is witnessed by exactly ONE lineage (Reverse Rewire), giving no basis to decode +2's semantic.
+
+### 0x262d — Source-take list per-entry wrapper (specialized name list)
+
+- **Kind:** CONTAINER, own block_type=1 (16/16). Exactly one immediate child 0x2628 (16/16), a LEAF (block_type=2, 0 sub-blocks). Parent = ALWAYS 0x262e (16/16), a single top-level container (block_type=1, parent=ROOT) whose ONLY direct children are these 16 0x262d entries. gparent = ROOT. NOTE: 0x262e is present (count=1) in EVERY corpus session but wraps 0x262d children only in this one session; elsewhere the general 0x2628 records sit under 0x2629 instead.
+- **Size:** Variable, driven by name length and base-vs-edit class. 0x262d size_field (span = 7 + size_field): BASE clips (flag 0) = 71 (7-char name) or 78 (14-char name); EDIT sub-clips (flag 1, '…-01' name) = 81/82 (10-char) or 88/89 (17-char). Payload = child-0x2628-total (7 + child_size_field) + 5 trailing bytes. Observed in only ONE corpus session (MANOLITO SIMONET TEATRO MELLA.bak.018), all 16 instances internally consistent.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (=z+9): child 0x2628 header `5A 02 00` (block_type=2), child size u32 @ payload+3, content_type 0x2628 @ payload+7.
+  - `+9`: child payload begins: u32 name_len, then name_len ASCII = clip/take name. Observed lengths 7 ('C0004_1'), 10 ('C0005_1-01'), 14 ('card 3 C0001_1'), 17 ('card 3 C0001_1-01').
+  - immediately after name (variable offset, name-length-dependent — no fixed absolute offset): u8 class flag = 0x00 (base take) / 0x01 (edited sub-clip). Correlates 1:1 with a '-01' name suffix.
+  - after class flag: 4-byte tag. BASE (flag 0): tag = `02 20 00 00` (16/16 of base). EDIT (flag 1): tag = `02 10 00 08` or `02 20 00 08` — the 4th tag byte 0x00 vs 0x08 selects offset width; the 2nd byte 0x10 vs 0x20 tracks offset magnitude, NOT base/edit.
+  - after tag: signed sample offset. BASE = i32 (e.g. `91 1e fe ff` = 0xfffe1e91 = −123247; all base offsets fall in 0xfffeXXXX, i.e. −65537..−131072). EDIT = i64 (e.g. −29, −90, −108, −64079, −65158) sign-extended with 0xFF bytes.
+  - after offset: byte-identical constant tail (16/16): `00 00 00 00 FF FF 04 00 04 00` + 24 zero bytes + `FF FF FF FF` (ends the child 0x2628 span).
+  - **0x262d OWN trailing** (after child 0x2628 ends): 5 bytes = u32 clip ORDINAL (0x00..0x0f, unique per entry = position in the 0x262e list) + 1 constant pad byte 0x00.
+- **Notes:** Each 0x262d wraps one 0x2628 name record holding a PT auto-capture/take name (e.g. 'C0004_1', 'card 3 C0001_1', with '-01' edit variants) plus a signed sample offset, and appends a clip-list ordinal + one pad byte. Structurally the exact analogue of 0x2629 (the per-entry wrapper of the GENERAL clip list under 0x262a). Best interpretation: a source-media / imported-take list, distinct from the region list (the general clip/region list is 0x262a → 0x2629 → 0x2628; here 807 regions live there vs 16 raw source takes under 0x262e). 0x262d and 0x2629 appear to share the same inner 0x2628 name-record schema.
+- **Confidence:** MEDIUM-HIGH on STRUCTURE, LOW on GENERALITY & SEMANTICS. All 16 instances verified: container→single-0x2628-leaf, block_type=1, parent 0x262e (top-level/ROOT), len-prefixed name, class flag, base i32 vs edit i64 offset (width selected by tag byte 4), byte-identical FF-FF tail, 5-byte trailing (ordinal + pad). **Low confidence caveat:** 0x262d occurs in ONLY 1 of 26 corpus sessions, so NOTHING here is proven to hold in other sessions; the offset meaning (source-file/sync sample offset) and the source-take interpretation are INFERRED.
+
+### 0x2716 — DUAL-ROLE: name-table placeholder (A) / session-metadata store (B)
+
+- **Kind:** Two variants, both block_type=1, distinguished by payload length (4 vs 64). (A) LEAF, no children; block-tree parent = 0x2519 container (immediate child, 4/4 distinct sessions). (B) CONTAINER with exactly one child 0x2715; block-tree parent = ROOT/top-level (4/4). Exactly one A and one B per session that has any (4/4).
+- **Size:** (A) size_field=6, payload=4, span=13. (B) size_field=66, payload=64, span=73. Both byte-identical across every instance. SAMPLE: only 6 corpus files contain 0x2716 and 3 (DWTS SHOW / __001 / __002) are byte-identical duplicates, so effectively 4 DISTINCT sessions (DWTS-2703, DWTS-SHOW, MANOLITO, THE WIND); the other 20 sessions contain NO 0x2716 at all — genuinely low-frequency / absent from most sessions.
+- **Fields:**
+  - **VARIANT A** (payload 4): `+0..+3` = `00 00 00 00` (all-zero, 4/4). No fields; a fixed structural name-table slot. Position is invariant: the 0x2519 name-table container lists N×0x251a lane-name entries, then this single 0x2716, then 0x4422, then 0x4420. The ordinal==track-count semantics belong to the 0x2519 CONTAINER (payload+16 u32 = track count = #0x251a lane records / 2 for stereo) and to the final-index track-count IndexRecord (ordinal = #lane-instance records), NOT to this block's 4 zero bytes.
+  - **VARIANT B** (payload 64): `+0` u32 = 1 (entry count, 4/4). `+4`: embedded child block 0x2715 header = `5A | 01 00 (bt=1) | 35 00 00 00 (size=0x35=53) | 15 27 (ct=0x2715)`. 0x2715 payload (@payload+13) = three u32-length-prefixed ASCII strings: key 'sessionMetadataBase64' (len 21), value 'AQAAAAAAAAA=' (len 12), format tag 'Base64' (len 6). Byte-identical 4/4. The value base64-decodes to `01 00 00 00 00 00 00 00` (u64 LE = 1).
+- **Notes:** Variant A is a structural name-table placeholder emitted as part of the master name-table trailer (0x2716, 0x4422, 0x4420) — an editor rebuilding the name table must preserve the trailer trio and keep the container's payload+16 count and the track-count IndexRecord's ordinal in sync with the lane count. NOTE: variant A is NOT itself pointed to by a 0x2716 child_ref — the final-index track-count record (a 0x2519 IndexRecord) carries a child_ref whose TYPE TAG is 0x2716, but its OFFSET points at the 0x2519 CONTAINER block, not at the physical 4-byte 0x2716 block; `final_index.py` keys ordinal==track-count off `child_refs[0].child_type in (0x251B,0x2716)`. Variant B is the SAME frozen empty-default constant in 100% of cases (the base64 value = u64 LE 1 in every session; no real metadata is ever populated) — the empty-default form of an extensible base64 metadata store; treat as PT-recomputed/default boilerplate.
+- **Confidence:** MEDIUM-HIGH (downgraded from HIGH). Byte-level facts are rock-solid and identical across every instance; the ordinal==track-count relationship is independently corroborated by `final_index.py` and the 0x2519 container's own count field. Downgraded because: (1) effective sample is only 4 DISTINCT sessions from a narrow PT-version range; (2) variant B's 'schema' is one observed constant, not a format seen to vary; (3) the physical-leaf-vs-child_ref distinction needed correction.
+
+### 0x261d — Master-fader / master-track definition record
+
+- **Kind:** CONTAINER — exactly two immediate children in ALL 11: 0x261b (definition bulk) then 0x200c (track view chain). Own block_type=1 (11/11). PARENT = ALWAYS 0x2624 (11/11), the top-level track-definitions container. 0x261d is NOT top-level/ROOT — it is a CHILD of 0x2624; 0x2624 (block_type 1) is the top-level block, present in all 26 sessions, holding ALL track records as siblings (0x261c many, 0x261e, 0x2621, 0x2620, 0x2623, and — when present — a single 0x261d).
+- **Size:** size u32 field = payload_len + 2; frame span end = z+7+size (11/11). Size-field values: 851 (Hipsters ×7), 849 (Bianca), 870 (Quality Time), 892 (Let Her Go), 1885 (DOPE). Payload = size−2. Baseline cluster ~849–892; DOPE grows to payload 1883 because one I/O slot carries an embedded automation subtree (0x2616 → 0x2615/0x2613/0x2614/0x1038/0x260e). Size is driven by embedded automation, not by a header field. PRESENT in only 11/26 corpus files (5 independent projects; 6 are Hipsters backup revisions of one project); ABSENT in 15/26 (DWTS ×4, Reverse Rewire ×7, COGNAC, MANOLITO, Never Will Marry, THE WIND). At most one per session, present only when a Master fader exists.
+- **Fields:**
+  - 0x261d payload has NO scalar fields of its own: child 0x261b starts at z+9 (payload+0), 11/11. Header: `5A 01 00`, size u32, ct=0x261b @ +7.
+  - 0x261b has exactly THREE immediate children (11/11): 0x102d (name/GUID wrapper) @ z+18, then 0x2627 (I/O slot list), then 0x260d (config) — 0x260d is the third peer child of 0x261b, not a sub-item of 0x102d.
+  - 0x102d @ z+18 (bt=2) has ONE nested child: 0x2619 @ z+27 (bt=1); 0x102d then has a 6-byte trailer `00 01 00 00 00 01`. The name/GUID exists exactly ONCE, in the nested 0x2619 leaf (not duplicated).
+  - 0x2619 leaf header @ z+27; its payload @ z+36 (31 bytes, 11/11): `+0` u32 name_len(=8), `+4` ASCII 'Master 1' (8 B), `+12` u8=0x01, `+13` u16=0x0100 (bytes `00 01` — NOT 0), `+15` u32=0 (`00 00 00 00`), `+19` tag `2A 00 00 00`, `+23` 8-byte GUID. GUID is unique per independent project (5 distinct values across 5 projects; the 7 Hipsters backups all share one GUID = same session identity).
+  - 0x2627 I/O slot list: payload+0 u16 = slot count (=0x000B=11 in all 11). Then N slots. A slot = 0x2625 (9-byte payload framing one empty 0x2626 child, plen 0). In 10/11 all 11 slots are 0x2625; in DOPE one slot is a 0x2616 automation blob instead (10× 0x2625 + 1× 0x2616), still 11 total.
+  - 0x260d config subtree (child of 0x261b): 0x1029 (bt=7) always present, plus 0x260a (×1–2), 0x260c (×2), and 0x260e (present in most but ABSENT in Bianca).
+  - 0x200c @ end of 0x261b (offset varies 669–1705, depends on 0x261b size): view/display chain 0x200a → [0x2015, 0x203b]; 0x2015 → [0x203b (×1 or ×2), 0x2434]. 'Two 0x203b' is common (10/11) but Quality Time has only ONE. Display/view-state, varies by session.
+- **Notes:** The session's Master fader/track definition — track name ('Master 1') + unique per-track GUID, an I/O-assignment slot list (0x2627), an automation/config subtree (0x260d, plus optional embedded automation), and the master track's edit-window view chain (0x200c). Name/GUID/I-O portions are AUTHORED session data; the 0x200c view chain is display/view-state PT recomputes and varies by session. Structurally a normal track record specialized as the master.
+- **Confidence:** HIGH on top-level structure verified 11/11 (parent=0x2624, children [0x261b, 0x200c], block_type=1, name='Master 1', unique 8-byte GUID at 0x2619-payload+23 after the `2A 00 00 00` tag, fixed relative offsets 0x261b@+9, 0x102d@+18, 0x2619@+27) and that it is a master-track record. MEDIUM on the exact meaning of the 0x2619 +12/+13/+15 scalar fields, the 0x2627 slot semantics, and 0x260d config sub-fields (structure confirmed, per-field meanings inferred).
+
+### 0x271a — Markers ruler / memory-location group root container
+
+- **Kind:** CONTAINER — always exactly 2 immediate children in fixed order, back-to-back with ZERO padding: 0x2619 (ruler/group descriptor) then 0x2030 (marker / memory-location data blob). Parent = ROOT (parent_of None, all 6). block_type (u16@z+1) = 0x0001. NOTE the 0x2619 child is not flat: it contains a fixed nested 0x4301 sub-block (block_type 0x0001, size 34) at 0x2619-payload offset +91, present in all 6.
+- **Size:** Size FIELD (u32@z+3) ranges 176 (MANOLITO, empty marker list) to 351500 (DWTS full). Exact decomposition (byte-verified, all 6): size = span(0x2619 child) + span(0x2030 child), no pre/between/post bytes. span(0x2619) fixed at 157 or 158 bytes (payload 148/149 + 9-byte header; the 158 case has one extra trailing 0x00). ALL variance is in the 0x2030 child: span 17 (size-field 10) when empty (MANOLITO), up to span 351341 when populated (DWTS). Total 0x271a SPAN when empty is 183 B (MANOLITO). Session-level singleton; present in ~1/3 of the corpus (6 of 19 loaded non-huge = 31.6%; 6/21 overall).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` (var): 0x2619 CHILD (ruler/group descriptor). Its payload (child z+9): +0 length-prefixed name string: u32 len=7 then ASCII 'Markers' (`07 00 00 00 4d 61 72 6b 65 72 73`); +11 flags/zeros region with a 0x01 marker byte at +13; the 8-byte ruler GUID appears 3× (each immediately after a `2A 00 00 00` tag) at 0x2619-payload offsets +18, +34, +136 (byte-identical within a session). A nested 0x4301 block (bt 0x0001, size 34) at 0x2619-payload +91. GUID observed: `98 17 0b d5 cc 8c ca 59` (DWTS, all 4 files incl. the 155-BPM derivative), `28 9b 86 d6 52 87 4b f6` (MANOLITO), `73 ed 90 d7 fe 0a cc b1` (THE WIND). The GUID is a PERSISTENT ruler identity that survives Save-As/edits (the 155-BPM DWTS is a differently-edited derivative with a different marker count yet the same GUID) — stable within a session lineage, distinct across unrelated sessions, NOT a strict per-file id.
+  - `+var` (var): 0x2030 CHILD — the marker / memory-location list data blob. Empty = size-field 10 (payload 8 zero bytes). When populated it holds per-group 0x2077 blocks and per-marker 0x2506 records (DWTS full: 123× 0x2077 + 18081× 0x2506; THE WIND: 21 + 1281; MANOLITO: 0 + 0). This leaf is the marker payload; NOT decoded here.
+- **Notes:** Root-level container for the 'Markers' ruler / memory-location group: holds the marker-ruler identity (name + 8-byte ruler GUID, in the 0x2619 child) plus the actual marker/memory-location list (the 0x2030 child). Present only in sessions that carry a markers ruler; its size is dominated entirely by the 0x2030 marker-data payload. 0x2619 and 0x2030 are GENERIC, heavily-reused content-types — the schema above holds only for the specific instances that are immediate children of 0x271a.
+- **Confidence:** HIGH. Re-derived and verified in MANOLITO + all 4 DWTS files + THE WIND (6 instances). Root-level (parent None), btype 0x0001, the name string, the 3× GUID at +18/+34/+136, the nested 0x4301 at +91, and the size decomposition (size = span(0x2619) + span(0x2030), zero padding) are byte-exact. The flag/zero bytes between name and GUIDs, the 0x4301 contents, and the 0x2030 marker-record internals were not exhaustively mapped.
+
+### 0x4422 — Format-group registry table (count-prefixed container of 0x4421)
+
+- **Kind:** CONTAINER — frame is `5A` + block_type u16=0x0001 + size u32 + content_type u16=0x4422; payload is a u16 child-count (=3) followed by exactly 3 immediate children, all 0x4421 (each a full 0x5A-framed block, NOT an inline field). Parent = 0x2519 (name/string table). Grandparent = ROOT (measured: 0x2519 has no enclosing block).
+- **Size:** size FIELD (u32@z+3) = 107 in every instance (all 6). Total block SPAN (z..e inclusive, e = z+7+size) = 115 bytes; PAYLOAD (z+9..e) = 106 bytes. No variation across 6 instances / 3 independent families (DWTS, MANOLITO, THE WIND).
+- **Fields:**
+  - `+0` (frame) u8: `5A` marker. `+1` (frame) u16: block_type = 0x0001. `+3` (frame) u32: size = 107 (block ends at z+7+size). `+7` (frame) u16: content_type = 0x4422.
+  - `payload+0` (=z+9) u16: child-count = 0x0003 (number of 0x4421 children).
+  - `payload+2 .. end`: exactly 3 back-to-back 0x4421 child BLOCKS (each a full 0x5A frame). Each 0x4421 payload = { +0 4 B tag code ('FCTP','d7TP','mATP'); +4 5 B constant `01 00 00 00 00`; +9 u32 str-len; +13 str-len ASCII }. Decoded, identical in all instances: FCTP→'ClipFX'(6), d7TP→'7.1.2 Formats'(13), mATP→'Ambisonics Formats'(18).
+- **Notes:** A small fixed factory string-table registering plugin/clip FORMAT-GROUP display names keyed by 4-char codes. Written verbatim by PT and byte-identical (single distinct 115-byte span) across unrelated sessions. PRESENCE IS OPTIONAL/VERSION-GATED: only 6 of 26 corpus sessions contain it (3 independent families; 4 of the 6 are DWTS variants); 20 sessions — including whole families (Reverse Rewire, Hipsters, DOPE) — have zero 0x4422 and open fine, so it is not required for validity and is almost certainly gated on a PT version new enough to register these newer format groups. If a synthesizer treats 107 as span or payload it will mis-place following blocks (span 115, payload 106). Safest treatment: a canned factory table to copy verbatim when targeting a recent PT version.
+- **Confidence:** HIGH (schema) / MEDIUM (universality). Schema + exact bytes CONFIRMED across 3 unrelated sessions (parent=0x2519, grandparent=ROOT both measured; block_type=0x0001; child-count=3; all 3 children 0x4421 with the tag/const/len-prefixed-name layout). Universality downgraded because 20/26 sessions omit the block entirely. The 4-char tags look obfuscated/hashed; stable but their derivation is unconfirmable.
+
+### 0x2435 — Score/print-page header field definition (LEAF)
+
+- **Kind:** LEAF (no child blocks; 0 descendants in all 7). block_type=0x0004. Parent = 0x2023 (a top-level session-settings/properties group, block_type=0x0012). Since 0x2023 is top-level, grandparent = ROOT.
+- **Size:** Fixed: span=84 bytes, declared size=77, payload=75 bytes across all 7 — byte-identical. IMPORTANT: all 7 instances belong to a SINGLE project ('Reverse Rewire', 7 sequential .bak backups); no other project family in the corpus carries 0x2435 at all, so cross-project size/value variance is UNPROVEN — a one-project observation.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32 len=5, then 'Title' (5 ASCII) → label #1 (occupies [0:9)).
+  - `+9` u32 len=8, then 'Composer' (8 ASCII) → label #2 (occupies [9:21)).
+  - `+21` 8 bytes of 0x00 (zero fill / separator) [21:29).
+  - `+29` u32 = 1 (count/flag) [29:33).
+  - `+33` f32 = 6.0 (page-layout dimension; specific meaning inferred, not proven).
+  - `+37` f32 = 15.0, `+41` f32 = 15.0, `+45` f32 = 15.0, `+49` f32 = 15.0 (a run of four 15.0 at [37:53)).
+  - `+53` 4 bytes = `01 01 01 01` (four boolean/enable flags) [53:57).
+  - `+57` f32 = 5.5, `+61` f32 = 9.25 (layout dims).
+  - `+65` 8 bytes of 0x00 (zero fill) [65:73).
+  - `+73` 2 bytes = `01 01` (trailing flags) [73:75), end of payload.
+- **Notes:** Stores the two default title-block field labels ('Title', 'Composer') as length-prefixed strings, followed by a small run of f32 page-layout geometry values (Score Editor page setup). A singleton child under the 0x2023 session-settings group, immediately after a sibling 0x2434. Score-editor page-setup state PT would recompute/rewrite from the Score Setup dialog. The 'Title'/'Composer' strings make the score/print-header role certain; WHICH geometric quantity each f32 represents is inferred from context, NOT proven.
+- **Confidence:** MEDIUM. All f32 offsets, the +53 flags, both strings, and the fixed 77-byte size are CONFIRMED exact across the 7 instances. GENERALITY CAVEAT: all 7 are one project, so treat as a one-project sample — role confident, exact geometric semantics best-effort, cross-project stability untested.
+
+### 0x2612 — I/O routing-path entry (single output/bus signal path)
+
+- **Kind:** CONTAINER (block_type u16 = 0x0003) with exactly 2 immediate children in fixed order: 0x2626 (a 2-byte empty/placeholder marker, block_type 0x0001) then 0x260e (path-detail record carrying the name, block_type 0x0001). Parent = 0x2627 (path list; sibling children there are 0x2625 ×6 and 0x2616 ×4). Grandparent = 0x261b (I/O/bus group). NOTE: the size-driven enumerator gives the two children a 1-byte overlap (0x2626 rel-end = 0x260e rel-start = 18) because they share the 0x5A frame marker.
+- **Size:** Whole 0x2612 span is 74 bytes, byte-identical across all 7 instances. The u32 size FIELD in the header is 66 (0x42); on-disk span = size+8.
+- **Fields (offsets payload-relative except header):**
+  - `+0..+8` (9 B): frame header — `5A`; block_type u16 = 0x0003; size u32 = 66; content_type u16 = 0x2612. Payload begins at +9.
+  - `+9`: child 0x2626 — header block_type 0x0001, size 2; its real payload is empty (the 1 declared payload byte is the shared 0x5A that begins the next child). Fixed empty 2-byte marker.
+  - `+18`: child 0x260e — header block_type 0x0001, size 48; payload (47 bytes) = { `+0..+1` two-byte index/ID (0xFFFF = unassigned here); `+2..+3` = `01 01` (flag pair; usually 0101 but sometimes 0100/0000 across sibling 0x260e, so NOT a fixed constant); `+4..+35` = 32 bytes of 0x00 (reserved / GUID slot, all zero here); `+36` u32 str-len = 5; `+40` ASCII 'A 1-2'; `+45` trailing 0x01; `+46` = 0x5A block-boundary marker (frame boundary, not the name) }. The routing-path NAME at 0x260e-payload +36 is the one field that generalizes (149 string-bearing 0x260e blocks in a single session all place their name at +36).
+- **Notes:** A single output/bus signal-path entry inside the session's I/O-setup section; its 0x260e child carries a length-prefixed routing-path name (here 'A 1-2', a PT hardware/bus output label). Grandparent 0x261b holds sibling path names 'Mix Bus', 'A 1-2', 'Bus 35-36', 'Bus 37-38'. I/O/routing display+setup state PT owns and recomputes; treat as opaque configuration. 0x2612 occurs exactly 7 times total — ONCE per session in 7 sequential backups of a SINGLE project (Reverse Rewire_M1.1.bak.073-079), effectively one real occurrence re-saved; zero 0x2612 in all other sessions.
+- **Confidence:** MEDIUM. CONFIRMED (byte-identical across all 7 backups): the 2-child structure/order, parent 0x2627, grandparent 0x261b, the I/O-setup role, 74-byte span, embedded name 'A 1-2'. The 0x260e '+0 ff ff' and '+2 01 01' are instance-specific (ID is 0xFFFF only when unassigned; the flag pair is not always 0101 across sibling records), so those widths/meanings are NOT independently proven as a general schema; the only cross-corroborated 0x260e field is the length-prefixed name at +36. Because 0x2612 lives in only one project family, the 0x2612-level field widths are not proven cross-project.
+
+### 0x200c — Per-Master-strip default-settings sub-container (CONTAINER)
+
+- **Kind:** CONTAINER — exactly one immediate child 0x200a. Ancestor chain confirmed in all 11: 0x200c ← 0x261d ('Master 1' strip) ← 0x2624 (top-level tracks/playlists group; no further parent). Nested tree of 0x200a: 180-byte form = 0x2015 → [0x203b(→0x2037), 0x203b(→0x2037), 0x2434] plus one sibling 0x203b(→0x2037) directly under 0x200a (3 × 0x203b/0x2037 + 1 × 0x2434 total); 158-byte form = 0x2015 → [0x203b(→0x2037), 0x2434] plus one sibling 0x203b(→0x2037) under 0x200a (2 × 0x203b/0x2037 + 1 × 0x2434 total). Block header type 0x0001; 0x200a is header type 0x0005; 0x2015 is header type 0x000f.
+- **Size:** Two size classes. 180 bytes (span 187): 10/11 instances (all 7 Hipsters baks, Bianca, DOPE, Let Her Go). 158 bytes (span 165): 1 instance (Quality Time). The 22-byte difference is exactly one 0x203b/0x2037 pair (span 22) removed from inside 0x2015 — a count difference of one nested key record, NOT a byte-different content variant. OPTIONAL: present in only 11/26 sessions (once each); absent from the other 15.
+- **Fields:**
+  - `+0` (9 B): 0x200c block header `5A | block_type u16=0x0001 | size u32 (180 or 158) | content_type u16=0x200c`. Payload starts at +9.
+  - `+9` (var): single child 0x200a (block header type 0x0005), holding the entire nested settings tree; no direct scalar fields between the 0x200c header and this child.
+  - Inside the tree, each key record is a 0x203b block whose payload begins with a 0x2037 sub-tag (block-size 2, ZERO payload bytes — an empty marker, NOT a 2-byte value) followed by the actual value (e.g. a u32 `01 00 00 00`). The value trails the 0x2037 inside the 0x203b.
+  - 0x2434 (block-size 11) has an INVARIANT 9-byte payload across all 11: `04 00 00 00 00 00 00 3c 00`.
+  - The 0x2015 payload contains session-VARYING numeric fields: an 8-byte little-endian IEEE-754 f64 whose high 2 bytes read `.. e0 3f` (=0.5 in most sessions) or `.. e1 3f` in Hipsters (`08 21 84 10 42 08 e1 3f` ≈ 0.502), plus u32 counters (e.g. `5c 00 00 00`, `12 7a 00 00`, `50 c3 00 00`). The meaning of each individual 0x203b/0x2037 key was NOT decoded.
+- **Notes:** An optional per-strip default-settings sub-container carried by the session's single Master channel-strip definition (under the one 0x261d whose length-prefixed strip name is 'Master 1'). Wraps a small nested tree of tag/value setting records (0x200a → 0x2015 → 0x203b/0x2037 pairs + one 0x2434). The 'default-settings' role is inferred from position under the Master strip, not proven. The varying f64/u32 values suggest stored settings rather than pure view geometry, but round-trip recompute-vs-persist behavior was not tested.
+- **Confidence:** MEDIUM. Container shape, single-0x200a child, the 0x200a→0x2015→0x203b/0x2037 + 0x2434 tree, header types, ancestor chain, and the invariant 0x2434 payload are CONFIRMED across all 11 instances spanning 5 distinct sessions. Semantics of individual key/value pairs undecoded; role inferred from position.
+
+### 0x2554 — Timeline/timebase ruler view-state settings LEAF
+
+- **Kind:** LEAF (zero child blocks in all 8). Parent = 0x2551 (ruler-scale settings) in every instance. Grandparent = 0x2587 (whose subtree holds the timebase display-format strings). Sibling set under 0x2551 varies (0x2552, 0x2553, 0x258b, sometimes 0x2555/0x2556). NOT always the last child of 0x2551 — in MANOLITO a 0x2555 sibling follows it.
+- **Size:** Variable and correlated with the framing block_type (u16@z+1): size 28 ↔ bt 0x0004 (Bianca, Quality Time); size 44 ↔ bt 0x0006 (DOPE); size 53 ↔ bt 0x000b (DWTS ×2 + copies, MANOLITO). Payload length = size − 2. Different sizes = different payload layouts/versions; do NOT assume one schema. ABSENT from 11 of 19 distinct corpus sessions (incl. both huge Hipsters sessions).
+- **Fields (offsets payload-relative = zmark+9; apply ONLY to the 0x01-form):**
+  - `+0` u8: format/version discriminator — 0x01 in 7/8 (Bianca, DOPE, DWTS ×4, MANOLITO) ⇒ flag-oriented layout; 0x08 in Quality Time ⇒ a structurally UNRELATED layout (opaque bytes `98 17 e8 f5 … ff ff ff ff`; NO `2A 00 00 00` GUID tag — treat as opaque). The offsets below apply ONLY to the 0x01-form.
+  - `+1` u32 LE: per-session id (observed 105 / 143 / 165 / 105); differs per session. (Low 3 bytes usually zero → effectively a small int.)
+  - `+5` u32 LE: per-session value (observed 520 / 552 / 723 / 970); differs per session.
+  - `+10..+18` (short 26 B form) / `+10..+25` (44 B & 53 B forms): run of 01/00 boolean display flags; mostly stable with a few differing bytes (e.g. +18, +23).
+  - `+26` (2 B) const `05 0a` — LONG-FORM ONLY (DOPE-44, DWTS/MANOLITO-53). ABSENT in Bianca-28 (too short to reach it). NOT universal to the 0x01-form.
+  - `+43` (1 B) const 0x55 — size-53 form ONLY (absent in DOPE-44, Bianca-28).
+- **Notes:** The settings LEAF under a grid/ruler-scale block. The 0x2587 subtree holds timebase display-format strings (bars|beats '0| 0| 240', min:sec '0:00.100', SMPTE '00:00:00:01.00', feet+frames '0+01.00', and a raw sample count). Confirmed display/view state PT recomputes, not stable session data (absent from >half the distinct sessions; payload version/format-dependent). DECLINE to claim a single cross-size schema.
+- **Confidence:** LOW for field schema; HIGH for role/parent/kids/absence. CONFIRMED: LEAF (0 children), parent always 0x2551, grandparent always 0x2587, and the 0x2587-subtree timebase strings; the 0x01-form skeleton (+0=01, u32 id@+1, u32@+5, flag run, '05 0a'@+26 in long forms, 0x55@+43 in size-53) holds across DOPE-44 + DWTS-53 ×2 + MANOLITO-53. 8 instances across 8 files but only ~5–6 distinct projects (3 byte-identical DWTS copies + 1 same-project variant). The Quality Time 0x08-form has no verifiable GUID (downgraded from 'GUID-bearing' to 'opaque').
+
+### 0x254d — NOT A REAL CONTENT TYPE (parsing artifact of the file-header index pointer)
+
+- **Kind:** REFUTED — not a block. It is the file-header index-pointer region (data[0x10:0x1f]) that the 0x5A size-walk erroneously enumerates as a top-level block at z=0x14. The header stub is framed `5A 01 00 04 00 00 00` + a 3-byte little-endian offset to the final index + `00`. The walker reads content_type=u16@z+7 = the LOW 16 bits of that offset, and payload u16@z+9 = the HIGH 16 bits. Reports parent=None and no children only because it is a header field, not a tree node.
+- **Size:** Not applicable. The 'size=4' the walker reports is the coincidental header constant 0x00000004 at data[0x17], identical in EVERY session, carrying no session-specific meaning. The next block (real header) always begins exactly at z+11 = 0x1f.
+- **Fields:**
+  - `@0` u16 = 0x003E (62 in DWTS) — REFUTED as a version. It is the HIGH 16 bits of the 24-bit final-index file offset; varies per session with total file size (observed 62, 5, 124, 93, 9, 2, 17, 7, 11 across the corpus). 'Byte-identical across the 3 DWTS files' only because they are the same session re-saved to the same byte size.
+  - NOTE: the reported content_type 0x254D itself = final_index.start & 0xFFFF (LOW 16 bits of the same offset). `ct | (field<<16)` reconstructs final_index.start exactly (verified 19/19 sessions). For DWTS the final index lives at file offset 0x3E254D, so the low half reads 0x254D and the 'version' reads 0x3E=62 — two halves of one 24-bit file-offset pointer, not a schema revision.
+- **Notes:** Do NOT add a 0x254d entry to the content-type spec. Instead document data[0x10:0x1f] as the fixed file-header index-pointer (template `31 00 05 xx  5A 01 00 04 00 00 00  <u24 final_index_offset> 00`) and note that a naive 0x5A scan/size-walk manufactures a phantom top-level block there whose 'content_type' equals final_index.start & 0xFFFF. The REAL first structural block is at z=0x1f: content_type 0x2067 (name-table header) in 2018+ sessions (DWTS/MANOLITO/THE WIND), or 0x0003 in older 10.x/11.x sessions. DWTS still CONTAINS a genuine 0x0003 version-string block near the tail (plain 'Pro Tools Ultimate … 2018.4.0 … Release …').
+- **Confidence:** HIGH (REFUTATION confirmed). The `ct | (payload<<16) == final_index.start` identity holds in 19/19 loadable sessions across every corpus family. The 'schema-version 0x254d' interpretation is disproven, not merely low-confidence.
+
+### 0x210c — Session-header scalar flag/count, always default (LEAF)
+
+- **Kind:** LEAF (top-level; parent = ROOT; zero descendants, verified across all 6 via a stack-based parent map). block_type=0x0001. Its top-level sibling sequence is (…0x2507, 0x2508, 0x25c0, 0x2107, [0x210c], 0x271f, 0x2530, 0x2516, 0x4400, 0x2716…). NOTE: in raw address order the block immediately BEFORE it is 0x210b, but those 0x210b records are CHILDREN of the preceding top-level 0x2107 block; the immediately-preceding top-level SIBLING is 0x2107.
+- **Size:** Fixed: block_type=0x0001, size field=6 (= 2-byte content_type + 4-byte payload). On-disk frame = `5A 01 00 06 00 00 00 0C 21 <4-byte payload>`; payload occupies z+9..z+12. (`_raw_block_bounds` reports an inclusive end of z+13, which is the 0x5A marker of the NEXT block.)
+- **Fields (offset payload-relative = zmark+9):**
+  - `@0` u32 (LE) = 0x00000000 — flag/count, always 0 (6/6, byte-identical). The 0x5A byte seen after the u32 is the next block's marker, NOT payload/padding.
+- **Notes:** A session-header scalar in the session-settings region. Present in exactly 6 corpus sessions (DWTS SHOW / __001 / __002, DWTS-for-2703, MANOLITO, THE WIND — newest-format only); absent from all older-format sessions. Likely a session-setting/display-state default PT writes and recomputes; value never varies, so no precise semantic beyond 'default scalar flag or counter'.
+- **Confidence:** HIGH on layout/structure (fixed size=6, single u32=0, LEAF top-level, byte-identical header across 6 instances in 3 distinct families; raw byte-pattern scan matches the size-driven parser count exactly, no phantoms/undercounts). LOW on precise semantic — value never varies (always 0).
+
+### 0x271f — Session-header scalar flag/count, sibling of 0x210c (LEAF)
+
+- **Kind:** LEAF (top-level; parent = ROOT; no children). block_type=0x0001.
+- **Size:** Fixed: size=6 (block_type=0x0001). Payload = 4 bytes. Total span 13 bytes [z, z+12]. Header `5A 01 00 06 00 00 00 1F 27`; payload `00 00 00 00`.
+- **Fields (offset payload-relative = zmark+9):**
+  - `@0` u32 = 0x00000000 — flag/count, always 0 (6/6 across all sessions that contain it).
+- **Notes:** Sits in the settings region immediately AFTER a run of 0x210b blocks and a single 0x210c, and immediately BEFORE 0x2530: layout [… 0x210b (long run) → 0x210c → [0x271f] → 0x2530 → 0x2516 → 0x4400…]. Byte-identical to the immediately-preceding 0x210c except the content-type word (0x210c = …0C 21, 0x271f = …1F 27). PERFECT co-occurrence with 0x210c: exactly the sessions containing 0x210c also contain 0x271f (and none otherwise), once each — present in the same 6 newest-format instances (DWTS SHOW/__001/__002 are save-variants of ONE session, so ~4 distinct sessions), absent from all older-format sessions. Likely display/session-preference state PT writes at default; treat as always-0 default when synthesizing.
+- **Confidence:** HIGH on layout/framing/co-occurrence (byte-exact, 6/6). LOW on precise semantic — value is invariant 0, so meaning (flag vs count vs enum) is unconfirmable.
+
+### 0x2715 — Session-metadata (key, value, encoding) string triple (LEAF)
+
+- **Kind:** LEAF (child of 0x2716; 0 children of its own). The size=66 0x2716 container has exactly one immediate child, this 0x2715, and its container payload begins with u32=1 which functions as the child-count.
+- **Size:** Fixed: size=53, block_type=0x0001. Frame span = [z .. z+7+size]; content_type u16 @ z+7; payload begins at z+9 and is 51 bytes (= size−2), fully consumed by the three length-prefixed strings (leftover=0). Byte-identical across all instances.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `@0` u32 len=21 + 21 ASCII = 'sessionMetadataBase64' (metadata KEY).
+  - `@25` u32 len=12 + 12 ASCII = 'AQAAAAAAAAA=' (VALUE; Base64 of `01 00 00 00 00 00 00 00` = u64 LE 1).
+  - `@41` u32 len=6 + 6 ASCII = 'Base64' (ENCODING tag).
+- **Notes:** A single session-metadata entry — the sole leaf item of the 0x2716 metadata-list container. Length-prefix = u32-then-ASCII throughout; no GUID `2A 00 00 00` tag (a string-triple, not a GUID blob). PRESENCE: found in only 6 of the 19 loadable non-Hipsters sessions (13 lack it) — a newer-format-only structure. CAVEAT on raw 0x5A scans: they surface a spurious size=6 '0x2716' frame nested inside a 0x2519 name-table block in every affected session; the REAL container is the unique size=66 0x2716 and the REAL entry is its size=53 0x2715 child. The decoded u64=1 most plausibly encodes a metadata format/version marker.
+- **Confidence:** HIGH for the fixed layout (size=53, block_type=0x0001, three length-prefixed strings at payload @0/@25/@41 consuming all 51 bytes, parent=0x2716, 0 children) — byte-identical in 6 sessions; value round-trips to u64 LE 1. MEDIUM for the SEMANTIC interpretation of u64=1 (format/version vs id vs flag is unproven; corpus is monomorphic).
+
+### 0x2716 (variant B, container view) — Session-metadata LIST container
+
+- **Kind:** CONTAINER, top-level (parent = ROOT). block_type=0x0001. Immediate (and only) child = one 0x2715. The 0x2715's own payload is three length-prefixed ASCII strings (key/value/encoding); that inner schema belongs to the 0x2715 entry, not this container.
+- **Size:** Fixed at size=66 in all 6 instances (block_type=0x0001). Frame span = [zmark, zmark+7+size] = 73 bytes. Payload starts at zmark+9 and is 64 bytes (= size−2) = 4 (u32 count) + 60 (the full 0x2715 child frame: 7-byte header `5A 01 00 <size:u32>` + its 53-byte content). Child span end == parent span end (no trailing bytes).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `@0` (=zmark+9) u32: count = 1 — number of 0x2715 children; only ever observed as 1.
+  - `@4` (=zmark+13): embedded 0x2715 block — `5A 01 00 <size=53:u32> 15 27 …`; child zmark = parent zmark+13, child block_type=0x0001 @child+1, child content_type=0x2715 @child+7 (= parent zmark+20), child payload @child+9. Decodes to key='sessionMetadataBase64', value='AQAAAAAAAAA=' (base64 → u64 LE = 1, opaque/PT-managed), encoding='Base64'.
+- **Notes:** The 64-byte session-metadata LIST container (variant B of the 0x2716 dual-role type; see the 0x2716 dual-role entry for variant A, the 4-byte name-table placeholder). Top-level position confirmed between 0x4400 (prev) and 0x0003 (next) in all 6; the 0x2530→0x2516→0x4400→0x2716→0x0003 subsequence holds in all 6. A naive 0x5A scan also reports a spurious size=6 '0x2716' per session (the bytes '16 27' occur inside a 0x2519 name-table entry, parent=0x2519, count=0, no real child) — filter by requiring a real 0x2715 child, not by content_type alone. Present in only 6/19 non-huge sessions (format-gated). The count>1 layout is inferred (never observed >1); the base64 value is opaque PT-managed metadata.
+- **Confidence:** HIGH on structural claims — bt=0x0001, size=66, count=1, one embedded 0x2715 (child bt=0x0001, ct=0x2715 at zmark+20) verified byte-identical across all 6 real instances in 3 distinct projects; top-level position confirmed. LOW on interpretation of the base64 payload (treated as opaque). Presence is format-gated (absent in 13/19).
+
+### 0x2301 — Low-frequency config/view-state singleton (LEAF)
+
+- **Kind:** LEAF from the framer's view. Its sole parent is 0x2302, a TOP-LEVEL container (no grandparent) whose ONLY direct child is this single 0x2301 — a strict 1:1 wrapper. The inner 13-byte 'blob' is NOT a valid sub-block (decoded as-if-a-block its type word is 0x0100 with high byte set, so the recursive framer does not descend). Framed children = [].
+- **Size:** Fixed: block_type=0x0001, size=25. Header is 9 bytes (`5A` + type u16 + size u32 + content_type u16); block spans the HALF-OPEN range [z, z+7+size) = [z, z+32). Payload = data[z+9 : z+32] = 23 bytes. The framer's end is EXCLUSIVE (== start of the next block, the 0x230a 'Custom' block); the 0x5A at rel-offset +32 belongs to that next block. A naive data[z+9:e+1] slice yields a spurious 24th byte.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `@0` u32 = 19 (0x13) — byte-count of the remaining payload (23−4). CONFIRMED both instances.
+  - `@4` u16 = 0 — CONFIRMED both instances.
+  - `@6` u32 = 13 (0x0D) — length of the trailing blob. CONFIRMED both instances.
+  - `@10` (13 B): opaque blob = `5A 00 01 00 00 00 06 00 01 00 00 00 00` (exactly 13 bytes; framing-shaped but NOT a real block — inner type word 0x0100 has high byte set so the framer skips it; content constant). Byte-identical both instances.
+- **Notes:** A low-frequency singleton in the 0x23xx setup region: by file position it sits immediately after 0x208f and its own container 0x2302, and immediately before 0x230a (which holds 'Custom 1'..'Custom 8+' name strings) and a run of 0x230b — the memory-location / window-configuration / custom-naming setup area. Best read as PT-recomputed config/view-state, not stable user-data. Appears in exactly 2 of the 25 non-Hipsters sessions (COGNAC …BASIC TRACKING 07.21.18.bak.000 and THE WIND_Vocal Tracking.bak.000), 1 instance each, payload byte-identical.
+- **Confidence:** MEDIUM on structure (CONFIRMED): size, block_type, all four field offsets/widths/values, parent, leaf-ness, and byte-identical payload re-derived from scratch across the 2 instances. LOW on semantic — no decodable strings inside; appears to be recomputed view/config state, not stable user data.
+
+### 0x2302 (count-behavior view) — Container wrapping 0 or 1 0x2301
+
+- **Kind:** CONTAINER (top-level; grandparent = ROOT; immediate child = 0x2301 only when count=1; NO children when count=0). block_type always 0x0001. Immediately preceded by 0x208f OR 0x209e and (in the count=0 case) followed by 0x230a.
+- **Size:** Variable, driven by count. count=0 → size=6 (payload = 4-byte count only); count=1 → size=38 (payload = 4-byte count + one embedded 25-byte 0x2301 block, 13-byte outer framing incl. the child's own 5A/bt/size/ct). Only sizes 6 and 38 observed. Exactly one 0x2302 per session; count=0 in 17/19 sessions, count=1 in 2/19 (appears in 19 of 26 loadable sessions).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `@0` u32: count = number of embedded 0x2301 children (0 or 1 observed). Fully predicts size: count=0→size=6, count=1→size=38.
+  - `@4` (only when count≥1): embedded child block `5A <bt=0x0001> <size=25 (u32)> <ct=0x2301> …`; child zmark starts at payload+4 = 0x2302_zmark+13. When count=0 there is NO @4 field — payload ends after the count.
+- **Notes:** Single top-level container in the 0x23xx setup/view-state region wrapping zero or one 0x2301 config/view-state record. count is 0 in the large majority (17/19), so 'count=1 + embedded 0x2301' is the minority case; the size=6 instances are legitimate root-level count=0 containers (NOT phantoms). The two count=1 spans (COGNAC, THE WIND) are byte-identical over the full span including the child (`5a0100260000000223010000005a01001900000001231300000000000d0000005a0001000000060001000000005a`). Given it lives in the 0x23xx display/config region and is almost always empty, most likely display/view-state PT recomputes rather than load-bearing data.
+- **Confidence:** HIGH on: single top-level instance per session, block_type=0x0001, count field @payload+0, count→size mapping (6/38), byte-identical count=1 span across the 2 sessions that have it. MEDIUM on the 0x2301 child's internal semantics (inherited). Verified across 19 sessions (≥10 distinct project names). [This is the same content-type as the earlier 0x2302 entry, described here from the count-behavior angle.]
+
+### 0x4400 — Channel Strip (cfx_cscs) serialized-parameter table
+
+- **Kind:** LEAF at the .ptx block level (block_type=0x0002; kids_inside=0 across all 6 — the internal cfx_cscs/cfx_csc/hcmp/cfx_param_chnk/px tags are the plugin's own nested chunk format, not 0x5A sub-blocks). Always top-level (parent=TOP). Sits between top-level 0x2516 (prev) and 0x2716 (next).
+- **Size:** size = 2 (ct word) + 4 (count u32) + count*2554 + 169 (trailing footer). Verified exactly: count=1 → size 2729 (payload 2727); count=6 → size 15499 (payload 15497). Per-record stride is a CONSTANT 2554 bytes. A fixed 169-byte footer is present regardless of count.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `@0` u32: record_count = number of Channel Strip plugin instances (verified 1 and 6, matching the count of 16-byte GUID records and of 'Process Order'/72-px-tag records).
+  - `@4` then record_count records, each EXACTLY 2554 bytes at payload-rel (4 + i*2554): [0:16] 16-byte plugin-instance GUID (distinct within a file; last 8 bytes = the constant class/type suffix `74 53 6B 43 EA 09 00 00` = 'tSkC'+ea090000 in every record), followed by a nested plugin chunk: raw-ASCII fourcc 'cfx_cscs' + u16 version(0x0001) + u32 size, then 'cfx_csc' + u16 ver + u32 size wrapping 'hcmp'/'cfx_param_chnk' and 72 'px' param entries.
+  - Each 'px' param entry: 'px' + u16 0x0001 + u32 chunk_size + u32 name_len + name ASCII + 8 value bytes. The 72-NAME list is byte-identical across all records and sessions ('Process Order','Phase Switch In/Out','EQ On/Off',…,'Fader Volume','Meters Tab'). The interleaved VALUES differ per instance (record0 vs record1 differ in 22 non-GUID bytes).
+  - **FOOTER** (after the last record): a fixed 169-byte trailing chunk BYTE-IDENTICAL across all sessions — a separate 'cfx_cscs' chunk whose cfx_param_chnk declares 3 params only: 'Dynamics Reveal','EQ Reveal','Filters Reveal'. NOT included in the @0 record_count.
+- **Notes:** A count-prefixed array of GUID-keyed records, one per Channel Strip plugin instance, each carrying that instance's serialized 72-parameter chunk. Lets PT resolve automation ordinals to human-readable names AND restore per-instance settings — it is NOT a pure name-only dictionary/cache: the param NAMES are identical across all instances/sessions, but each record embeds distinct per-instance parameter VALUES, so it is primary instance state. Cross-file identity: the record with GUID 7aba93f9 56281a9d… is index 4 of the count=6 DWTS session AND the SOLE record of every count=1 session (THE WIND / MANOLITO / DWTS-for-2703) — same plugin-instance state reused across those files. Present in 6 instances across 4 distinct newest-format sessions.
+- **Confidence:** HIGH on role, framing, and every top-level/size/offset claim (block_type=0x0002, top-level, LEAF, next-top=0x2716; record_count u32@0 == instance count == GUID-record count; 2554-byte constant stride; 16-byte GUID with constant last-8 suffix; 72 px param names byte-identical across 6 instances in 4 sessions; +169 footer and its 3 extra names byte-identical). MEDIUM/characterization-only on the DEEP plugin-internal sub-chunk layout (the outer cfx_cscs/cfx_csc tag+ver+size framing is clean, but hcmp/cfx_param_chnk internal sub-sizes do NOT parse as a uniform tag+ver+size scheme — a plugin-proprietary format characterized but not fully schematized).
+
+### 0x2623 — Clip-group / compound-clip (region-group) definition record
+
+- **Kind:** CONTAINER; parent 0x2624 (the top-level clip/playlist list, whose payload begins with a u32 that equals its immediate-child count — confirmed 79 header == 79 children). Immediate children of 0x2623, in order: 0x2619 then 0x200e. First child (0x2619) begins at payload offset 0 (0x2623 has no own header/prefix bytes before it). block_type(u16@z+1)=0x0001. VERIFIED on 1 instance only.
+- **Size:** Variable. ONLY ONE instance exists in the local corpus (payload_size u32 = 436). Cannot confirm any broader size range/modes — those come from a larger corpus not available here. 436 is a single data point.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u16: first child 0x2619 identity block begins immediately at payload offset 0 (0x2623 has NO own header bytes). In the one instance, 0x2619 payload = length-prefixed name ('C0004_1') then flags then one or more GUIDs, each following a `2A 00 00 00` tag (8 GUID bytes). 0x2619 spans payload offsets [0,157) (span = 7+150).
+  - `+157` (4 B): gap between the two children = `00 00 00 00` (u32 0). The two children are NOT back-to-back adjacent. (1 instance; may be a fixed separator or a variable field.)
+  - `+161` u16: second child 0x200e view-state block; spans payload offsets [161,424) (span = 7+256). Its immediate child is 0x2015 (part of the 0x200e view chain).
+  - `+424` (10 B): trailer after the last child, before block end = `01 00 00 00 00 00 00 00 01 00` (u32 1, u32 0, u16 1). Real tail data after 0x200e. (1 instance; structure/variability unknown.)
+- **Notes:** Defines one named, GUID-identified clip group, pairing its identity (child 0x2619: length-prefixed name + GUID) with its saved edit-window display/automation view state (child 0x200e). Lives among the session's playlists inside the top-level 0x2624 container, interleaved with 0x261c/0x261e track-playlist blocks (in the one instance: 71× 0x261c + 7× 0x261e + 1× 0x2623). Role inferred from the single available instance; the 0x200e view-chain fields look like display/view-state PT recomputes.
+- **Confidence:** MEDIUM — SEVERE SAMPLING LIMITATION: 0x2623 appears in EXACTLY 1 instance in EXACTLY 1 session (MANOLITO SIMONET TEATRO MELLA.bak.018) across the entire local 26-session corpus (confirmed by both the descent enumerator and an independent raw byte-signature scan). The schema rests on a single observation; the '≥2 sessions / multiple instances' requirement is unmet locally. CONFIRMED on the single instance: block_type=0x0001; span=[z,z+7+size); parent=0x2624; parent u32-header == child-count (79==79); child order [0x2619, 0x200e]; 0x2619 = length-prefixed name + GUID(s) after `2A 00 00 00`; 0x200e has immediate child 0x2015. The 4-byte gap between children and the 10-byte trailer after 0x200e could be fixed constants or variable-length fields — unknown.
+
+### 0x2619 — Generic per-object NAME + GUID record
+
+- **Kind:** FORM-DEPENDENT (keyed by block_type, which tracks session vintage). SHORT form (block_type 0x0001, 1219/1877) is a LEAF with NO children. BIG form (block_type 0x0007=540, 0x0008=118) is a CONTAINER whose payload embeds exactly one nested 0x4301 (a 34-byte 'valid'/reference placeholder), 658/658. Parent is 0x102d for 1846/1877 (grandparent 0x261b, the track/name list); conductor tracks add a handful of 0x2718–0x271c parents; exactly 1 lone instance is under a 0x2623 (an incidental audio-clip name). block_type is uniform WITHIN a session (session-vintage correlated: 0x0001 older; 0x0007/0x0008 for the DWTS/MANOLITO/THE WIND family).
+- **Size:** TWO regimes. SHORT form (block_type 1): payload_len == name_len + 23 EXACTLY (1219/1219), i.e. 4(name_len u32) + name_len + 7(flags) + 4(GUID tag) + 8(GUID). BIG form (block_type 7/8): payload_len ≈ 146–155 (658 instances), because after the single-GUID head it appends a second GUID copy, a zero-run with a `01 00 00 00` marker, the embedded 34-byte 0x4301 child, and a third GUID copy.
+- **Fields (offsets payload-relative = zmark+9):**
+  - `+0` u32: name_len.
+  - `+4` char[name_len]: object name (ASCII, decoded 1877/1877). Examples: 'Audio 1', 'Click', 'Tempo', 'Meter', 'Key Signature', 'Verb 1', 'Inst 3', 'voc 1.dup1'.
+  - `+(4+name_len)` 7 bytes: flags. Value `01 00 01 00 00 00 00` for ALL short-form (1219/1219) and most big-form; a `00 00 01 00 00 00 00` variant appears on 30 big-form conductor-track instances (so NOT fully constant).
+  - `+(11+name_len)` u32: GUID tag = `2A 00 00 00` (1877/1877).
+  - `+(15+name_len)` 8 bytes: GUID#1 (the object's GUID; unique per object within a session).
+  - SHORT form ends here (block_type 1): total payload = name_len+23; tail after name = flags(7)+tag(4)+GUID(8) = 19 bytes. Single GUID only. LEAF.
+  - BIG form only (block_type 7/8): `+(23+name_len)` u32 sep = `00 00 00 00`; `+(27+name_len)` u32 tag = `2A 00 00 00`; `+(31+name_len)` 8 bytes GUID#2 (byte-identical to GUID#1, 658/658); then a mostly-zero run containing a `01 00 00 00` marker; then an EMBEDDED nested 0x4301 child block (`5A 01 00 22 00 00 00 01 43 …`); then a final `2A 00 00 00` + 8-byte GUID#3, also byte-identical to GUID#1 (658/658). So the big form stores the GUID THREE times.
+  - GUID note: the 8-byte GUID's high 4 bytes cluster per-session (a session/creator prefix), consistent with the project's `2A 00 00 00` GUID convention.
+- **Notes:** A generic per-object name+GUID record — the identity payload inside a 0x102d name-wrapper. Any named object (audio/aux/MIDI track, sub-lane, conductor Tempo/Meter/Key/Chord, even audio clips) gets one; NOT specific to clip-groups. Matches the project's own docs (ptx-format-spec.md: '0x102D → 0x2619 → 0x4301' and 'a nested 0x2619, then an 8-byte track GUID after a 2A 00 00 00 tag'). Core project/session structure PT reads back (name table), not recomputed view-state.
+- **Confidence:** HIGH (structure). The generic-name+GUID-under-0x102d role is high-confidence; the earlier clip-group/0x2623 role is REJECTED (only 1 of 1877 instances is under a 0x2623, and that is an audio-clip name). Verified across 19 corpus sessions = 1877 instances (Hipsters skipped). Parent-map result: parent=0x102d ×1846, plus 0x2718/0x2719/0x271a/0x271b/0x271c ×6 each (conductor tracks) and 0x2623 ×1.
+
+### 0x200e — Clip-group display/view-state wrapper (CONTAINER)
+
+- **Kind:** CONTAINER. block_type(u16@z+1)=0x0002 in every instance. Parent=0x2623 (verified 7/7 distinct sessions). Wraps exactly ONE immediate child, a 0x2015 deep view chain (0x2039/0x2037, 0x2105/0x2103, 0x2434, and a 0x2580→0x203b volume-automation-lane group when present). The 0x2015 child begins at payload offset 0 (no pre-child bytes) and is followed by exactly 8 trailing 0x00 bytes, so payload_size = 9 + child_0x2015_declared_size + 8.
+- **Size:** payload_size (u32@z+3) is data-dependent: observed 160, 179, 237, 241, 256 across the corpus (256 by far the most common). Driven by the wrapped 0x2015 view chain: ~256 when the chain includes a 0x2580 volume-automation-lane group; ~179 when it does not; smaller/other values reflect fewer 0x2039 view-state lanes and/or the 0x2580 group. LOW-FREQUENCY, session-specific type — rare in distinct sessions (~1.5–1.8% in random samples); copied into every backup of a session that has it, so per-FILE counts are inflated (256 files / 303 instances across only ~3 known session families).
+- **Fields (offsets payload-relative = zmark+9):**
+  - `payload+0` — first and only child: the 0x2015 view-chain block; starts exactly at payload offset 0 (no header/prefix bytes of its own). Its span is 9 + its declared size. All size variation of 0x200e comes from here.
+  - `payload+(9+child_size) .. end` — 8 fixed 0x00 bytes (reserved/padding); always all-zero across every instance and size variant.
+- **Notes:** The second (last) child of a 0x2623 clip-group block (the 0x2623's two children are always [0x2619, 0x200e]); holds the group's saved edit-window view chain (track/lane display + automation lanes) as a single wrapped 0x2015 sub-block. Carries no meaningful data of its own beyond an 8-byte zero tail; its size is entirely a function of the wrapped 0x2015 view chain → PT recomputes it from display state. The 179-vs-256 delta is the 0x2580 automation-lane group; smaller variants (160/237/241) are driven by the number of 0x2039 view lanes as well. GUIDANCE: do not author fields inside it; copy the 0x2015 chain wholesale and append the 8 zero bytes.
+- **Confidence:** HIGH. Verified on ≥6 DIFFERENT distinct sessions spanning ALL observed size classes: block_type=0x0002; parent=0x2623 with children exactly [0x2619,0x200e] and 0x200e at index 1 (7/7); exactly one child = 0x2015 at payload offset 0; 179-vs-256 delta is the 0x2580 group; payload_size = 9 + child_size + 8 exactly. NOTE: '102 instances across 83 sessions' style counts are per-file/per-backup, not distinct-session frequency (which is much lower).
+
+### 0x2555 — Trailing footer/terminator of a 0x2551 edit-group (LEAF)
+
+- **Kind:** LEAF (0 immediate children in the single instance found). parent = 0x2551; grandparent (0x2551's parent) = 0x2587. Both confirmed on ONE instance only.
+- **Size:** In the ONE instance: block_type(u16@z+1)=0x0002, size field(u32@z+3)=7, payload length = 5 bytes (=size−2, since the size field covers the 2-byte content_type word plus payload). CANNOT confirm any multi-width table — this corpus has 1 instance total.
+- **Fields (offsets payload-relative = zmark+9):**
+  - Header layout (confirmed on the 1 instance): `5A`@z; block_type u16@z+1; size u32@z+3 (block span = [z, z+7+size]); content_type u16@z+7 = 0x2555; payload@z+9.
+  - `+0` (bt=0x0002): payload = 5 bytes, all zero (`00 00 00 00 00`) in the single observed instance. Consistent with a reserved/all-zero footer, but only 1 data point.
+  - UNVERIFIED: a proposed bt=0x0001 → 3-byte payload branch (with a 'packed ~20-bit field') and a bt=0x0003 → 6-byte payload branch. ZERO bt=1 and bt=3 instances exist in this corpus; cannot confirm or refute.
+  - Pairing: the sibling 0x2554 immediately preceding this 0x2555 has block_type=0x000b (=11), consistent with a 'bt=11 pairs with 0x2555 bt=2/3' hypothesis — but only 1 example.
+- **Notes:** A trailing footer/terminator sub-record of a 0x2551 track edit-group (region/clip grouping) block; the LAST of 0x2551's 6 children (order: 0x2552, 0x258b, 0x2552, 0x2553, 0x2554, 0x2555), immediately after the 0x2554 sibling. In the one instance available it is a small all-zero reserved field. The block_type↔payload-width version-tag hypothesis is plausible (block_type is a schema-version tag elsewhere in this format) but rests on a single observed width. Safe-to-copy guidance is reasonable for the observed all-zero bt=2 case; do NOT assume the bt=1/bt=3 branches.
+- **Confidence:** LOW — for a corpus-coverage/honesty reason, NOT because anything was contradicted. Both the size-driven walk AND a raw 0x5A scan agree it appears exactly ONCE in the entire local corpus (26 sessions), solely in 'MANOLITO SIMONET TEATRO MELLA.bak.018', as bt=0x0002 / size=7 / payload `00 00 00 00 00`. Any broader frequency/width tables (bt=1 3-byte, bt=3 6-byte) are UNCONFIRMABLE here.
+
+### 0x2298 — NOT A REAL CONTENT-TYPE (spurious decode of the file-header stub)
+
+- **Kind:** N/A — a spurious decode of the fixed 11-byte file-header stub at file offset 0x14, framed `5A 01 00 04 00 00 00 <word:2> <payload:2>`. The two bytes at z+7 (the nominal content_type slot) are a per-file variable checksum-like value that only coincidentally read as 0x2298 in one corpus session (COGNAC). PT does not parse this stub as a block: `parse_version()` (core.py:452) hardcodes `parse_block_at(0x1F)` and reads the REAL header block at offset 0x1F (content_type 0x0003 or 0x2067). Deep enumeration over 19 diverse sessions found exactly ONE 0x2298 read total (the COGNAC stub at 0x14); zero real 0x2298 blocks anywhere in the block tree.
+- **Size:** Stub size u32 = 4, total 11 bytes: span [0x14, 0x1F). Layout: 7-byte frame prefix (`5A` + block_type u16=1 + size u32=4) + 2-byte word at z+7 + 2-byte payload at z+9. The next block (real header) always begins exactly at z+11 = 0x1F (verified 19/19 and 800/800). The stub frame `5A 01 00 04 00 00 00` is constant in 19/19 loaded sessions and 800/800 sampled backup-corpus files; as a raw block its zmark=0x14, end=0x1F, parent=None, no children (the real header at 0x1F lies OUTSIDE its span).
+- **Fields:**
+  - `+0` (=z+7, 2 B): NOT a content_type. A per-file checksum-like word (content-derived: byte-identical files share it; each differing save changes it). Distinct in 784/800 sampled files. Reading it as content-type 0x2298 is a false positive present in exactly one session (COGNAC).
+  - `+2` (=z+9, u16): a volatile per-file counter, NOT the session version. Ranges 0..823 across the corpus (mean ~77, 212 distinct values in 800 files); stable within a backup series, occasionally +1 on save. The 'session format version (05 00 = version 5)' reading is a COGNAC-only coincidence (COGNAC payload=5 is PT 11.3.2; Reverse Rewire payload=124/125 is PT 10.3.5; Quality Time payload=2 is PT 10.3.5). The real version is parsed from the 0x1F header block.
+- **Notes:** Do NOT model 0x2298 as a block type. It is the offset-0x14 header stub whose z+7 word is a per-file (content-derived checksum-like) value that only reads as 0x2298 in one session. The z+9 word is a save-counter-like field, not the session format version. xor note: for xor_type=5, bytes < 0x1000 use key index 0 → key 0, so 0x14..0x1F are raw (verified byte-identical to on-disk); the same handling applies to xor_type=1 after unxor.
+- **Confidence:** HIGH (refutation confirmed). Verified via 19 fully-loaded corpus sessions with deep block enumeration + 800 randomly-sampled files from the 43k-file backup corpus.
