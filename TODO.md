@@ -148,8 +148,8 @@ its tallied child type). Broaden validate() beyond the 3 track containers as mor
 ## Track-edit EOS — the `0x2519` name-table fault FOUND + FIXED via a stream-walk validator (2026-07-01)
 
 The count fix (above) was necessary but NOT sufficient — PT still EOS'd. Built a count-driven
-stream-walk validator matching PT's read semantics in `ptxformatwriter/eos_validator.py` (clean, format-terms
-only). It reproduced the real fault: the `0x2519` name table's INLINE name-entry list (each entry
+stream-walk validator matching PT's read semantics in `ptxformatwriter/eos_validator.py` (clean,
+format-terms only). It reproduced the real fault: the `0x2519` name table's INLINE name-entry list (each entry
 `u32 len | name | 23-byte trailer` with a `0x2A` marker at trailer+6) was left MISFRAMED —
 `remove_track` deleted only `len|name` (orphaned the trailer), `duplicate_track` inserted a
 trailer-less copy. The block size + framed `0x251A` children were adjusted, so the size-driven
@@ -159,3 +159,26 @@ entry (`+_NAME_ENTRY_SUFFIX`). `body_synth.validate()` now runs the ported `eos_
 and both edits + round-trip are clean. PENDING: user re-tests the regenerated verify_2/verify_3 in
 PT (third time). The validator is a real oracle now; extend `eos_validator` with more object grammars
 (index records, per-track objects) as future edits need them.
+
+## Track edits — DONE (PT-confirmed) + duplicate byte-identical (2026-07-01)
+
+The EOS saga resolved: the real root cause was the **master index**, not the body — the
+byte-identity check had been skipping the trailing `0x0002` region the whole time. `remove_track`
+(last AND middle) now opens+closes clean in PT (`verify_3/4/5`); the fix drops dead index records
++ re-ranks per-track ordinals (`final_index.rebuild_after_track_drop`). `duplicate_track` crashed
+on close from a **channel collision** (the copy inherited the source's channel indices); fixed by a
+per-track BODY positional-renumber (`body_synth._rekey_positional_by_slot` + free-field slide), so a
+duplicate is now **whole-file byte-identical to a fresh valid synth** with the track in position
+(`verify_2` PT re-test pending). Spec §12b documents the positional fields. Remaining: generalize
+the duplicate renumber beyond all-stereo synth (mono/mixed/real sessions) — the offsets are
+currently stereo-synth-specific.
+
+## Format documentation — COMPLETE: 100% content-type coverage (2026-07-01)
+
+Every **real** content-type in the 26-session corpus (280/280) is documented — spec §16 extended
+catalog (4 dissect→verify→draft batches) + §12b + the pre-existing §1–15. Spec §3 documents the
+`0x5A`-in-data **phantom** caveat (25 bogus "types" the naive size-walk manufactures inside leaf
+payloads/the file header — a correct parser recurses by grammar, not raw `0x5A` scan).
+`docs/content-type-coverage.md` is the live ✓/phantom/undocumented checklist. Reimplementation
+fidelity: full-file load→re-encrypt 26/26 byte-exact, index `serialize(parse)` 26/26, all readers
+26/26, 161 tests green.
