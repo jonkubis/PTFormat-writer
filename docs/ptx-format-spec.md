@@ -94,6 +94,25 @@ offset  size  field
 To enumerate **top-level** blocks, walk from the body start, reading `block_size` to skip
 to the next block, until the `0x0002` master index (always last).
 
+### Phantom blocks — do not recurse into leaf payloads
+
+`0x5A` is the byte `'Z'`, and it occurs freely inside **leaf data** — ASCII strings, GUIDs,
+plug-in FourCC codes, the file header. A block walker that descends into *every* block's payload
+looking for `0x5A`-framed children will therefore manufacture **phantom blocks**: a stray `0x5A`
+inside a leaf gets read as a frame header, yielding a bogus `content_type` and a tiny span. In
+this corpus the naive full-recursion walk over 26 sessions produced **23 phantom "types"**
+(26 block instances, 0.002% of all blocks) — their signature is unmistakable: a **single
+instance**, span ~8–12 bytes, an **implausible/high `content_type`** (e.g. `0xd297`, `0x9de1`,
+`0x4e58`, `0x2fa3`), sitting **inside another block's payload** (one `0x1900` was a `0x5A` in a
+`0x1017` plug-in FourCC; one `0xd297` was in the file header). A few phantoms even land on a
+plausible-looking low `content_type`, so range alone is not a reliable filter.
+
+Real content-types are confined to `0x0002`, `~0x1000–0x27xx`, and `~0x4300–0x45xx`. A correct
+parser bounds recursion **by the grammar** — it only looks for children inside block types known
+to be containers, never inside leaves (strings, GUIDs, `0x1000`/`0x1017` records, etc.). The
+`0x0002` master index is the authority on which blocks are real; anything the walk finds that the
+index never references, and that sits within a leaf's declared payload, is a phantom.
+
 ---
 
 ## 4. Primitive encodings

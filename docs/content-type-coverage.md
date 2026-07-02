@@ -1,10 +1,12 @@
 # `.ptx` content-type coverage tracker
 
-Snapshot over the 26-session corpus. **236/305** content-types documented = **99.94%** of all 1,411,849 block instances.
+Snapshot over the 26-session corpus. **282 real content-types** (excluding 23 `0x5A`-in-data phantom artifacts — see spec §3 *Phantom blocks*).
 
-`✓` = referenced in `docs/ptx-format-spec.md`. Sorted by block-instance frequency.
+**236/282** real types documented = **99.95%** of all 1,411,823 real block instances.
 
-| content-type | blocks | in #sessions | documented |
+Status: `✓` documented · `phantom` = 0x5A-in-data artifact (not a real type) · blank = real, undocumented. Sorted by frequency.
+
+| content-type | blocks | in #sessions | status |
 |---|---:|---:|:---:|
 | 0x104f | 217354 | 26 | ✓ |
 | 0x1050 | 213740 | 26 | ✓ |
@@ -275,39 +277,39 @@ Snapshot over the 26-session corpus. **236/305** content-types documented = **99
 | 0x271f | 6 | 6 |  |
 | 0x4400 | 6 | 6 |  |
 | 0x2715 | 6 | 6 |  |
-| 0x1900 | 4 | 4 |  |
+| 0x1900 | 4 | 4 | phantom |
 | 0x2079 | 4 | 4 | ✓ |
 | 0x2618 | 4 | 1 | ✓ |
 | 0x254d | 3 | 3 |  |
 | 0x2039 | 3 | 1 | ✓ |
 | 0x2078 | 2 | 2 | ✓ |
 | 0x2301 | 2 | 2 |  |
-| 0x2fa3 | 1 | 1 |  |
-| 0x34da | 1 | 1 |  |
-| 0x36de | 1 | 1 |  |
-| 0x36fa | 1 | 1 |  |
-| 0x392f | 1 | 1 |  |
-| 0x3419 | 1 | 1 |  |
-| 0x43ee | 1 | 1 |  |
-| 0x9de1 | 1 | 1 |  |
-| 0x4e58 | 1 | 1 |  |
-| 0x4f81 | 1 | 1 |  |
-| 0x4fc1 | 1 | 1 |  |
-| 0x535d | 1 | 1 |  |
-| 0x7739 | 1 | 1 |  |
-| 0x899d | 1 | 1 |  |
-| 0x04e8 | 1 | 1 |  |
-| 0x5c9e | 1 | 1 |  |
+| 0x2fa3 | 1 | 1 | phantom |
+| 0x34da | 1 | 1 | phantom |
+| 0x36de | 1 | 1 | phantom |
+| 0x36fa | 1 | 1 | phantom |
+| 0x392f | 1 | 1 | phantom |
+| 0x3419 | 1 | 1 | phantom |
+| 0x43ee | 1 | 1 | phantom |
+| 0x9de1 | 1 | 1 | phantom |
+| 0x4e58 | 1 | 1 | phantom |
+| 0x4f81 | 1 | 1 | phantom |
+| 0x4fc1 | 1 | 1 | phantom |
+| 0x535d | 1 | 1 | phantom |
+| 0x7739 | 1 | 1 | phantom |
+| 0x899d | 1 | 1 | phantom |
+| 0x04e8 | 1 | 1 | phantom |
+| 0x5c9e | 1 | 1 | phantom |
 | 0x2556 | 1 | 1 | ✓ |
 | 0x2298 | 1 | 1 |  |
-| 0xd297 | 1 | 1 |  |
-| 0x5667 | 1 | 1 |  |
-| 0x600a | 1 | 1 |  |
+| 0xd297 | 1 | 1 | phantom |
+| 0x5667 | 1 | 1 | phantom |
+| 0x600a | 1 | 1 | phantom |
 | 0x1053 | 1 | 1 | ✓ |
 | 0x2623 | 1 | 1 |  |
 | 0x200e | 1 | 1 |  |
 | 0x2105 | 1 | 1 | ✓ |
 | 0x2555 | 1 | 1 |  |
-| 0x8717 | 1 | 1 |  |
-| 0x45cb | 1 | 1 |  |
-| 0x71ed | 1 | 1 |  |
+| 0x8717 | 1 | 1 | phantom |
+| 0x45cb | 1 | 1 | phantom |
+| 0x71ed | 1 | 1 | phantom |
