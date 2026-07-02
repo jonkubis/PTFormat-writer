@@ -609,6 +609,64 @@ tracks to `Audio N` for the splice and restore the names after — which is what
 
 ---
 
+## 12b. Per-track positional fields — channels, ordinals, id-pools, provenance
+
+When a track is **inserted or removed mid-list**, three classes of per-track field must be kept
+consistent or Pro Tools parses the file yet **crashes when it reconciles routing on close**.
+The read side tolerates staleness (a bad session *opens*); the close/save path does not. All
+offsets below are anchored on each block's own `name_end` (= `namelen` field + the name bytes),
+never a fixed block offset — the anchor slides by one byte per extra name-length digit.
+**(all-stereo synthesis; PT-confirmed via whole-file byte-identity to a fresh session)**
+
+**1. Stereo channel indices — the collision that crashes on close.** In every per-track
+`0x1014` block (also inlined into the `0x1015` container) there are two channel *sites*, each
+holding the same pair: SITE1 = two `u16` at `name_end+5`/`+7`, SITE2 = two `u32` at
+`name_end+32`/`+36`. For a stereo track at **0-based display row `p`**: `ch0 = 2p`,
+`ch1 = 2p+1`. Purely a function of the final row — inserting a stereo track at row `P` bumps
+every row `≥ P` by 2 (one stereo pair; +1 for a mono insert). A *duplicate* that copies the
+source's blocks inherits the source's channels, so the copy and its source both claim the same
+pair → the on-close crash. A *middle remove* only leaves a channel **gap** (no collision), which
+is why removing a middle track closes cleanly with no channel renumber.
+
+**2. Ordinals (display position), five families.** All little-endian, value tied to the row:
+- `0x200a`/`0x200b`/`0x2015` — one nested subtree per track (same bytes reappear in all three
+  enclosing types); ordinal is a `u32` at `+18` after the inner `0x2434` anchor
+  `5A 01 00 0B 00 00 00 34 24 04 00 00 00 00 00 00 3C 00`. Value = `p+1` (1-based).
+- `0x2519` name table — one variable-length entry per track in display order; ordinal `u16` at
+  `name_end+18` (restricted to the region before the first framed child). Value = `p+1`.
+- `0x251a` lane instances — `2N` instances laid out **lane-major** (indices `0..N-1` = lane 0 of
+  rows `0..N-1`, then lane 1); `row = idx mod N`; ordinal `u16` at `name_end+18` = `p+1`.
+- `0x2589` overview blocks — `u16` at `zmark+9` = `p` (0-based). Inlined into containers
+  `0x2551`/`0x2587`/`0x258a`/`0x258b`; for the two-instance `0x258a`/`0x258b` all `N` children
+  live in the **second** instance.
+
+**3. Element-id pools — a free, renumberable pool (NOT block-index references).** Each per-track
+`0x261b`/`0x261c` block carries a run of **10 consecutive `u32`** ids after the `01 01 0A 00`
+marker (`ids[j] = ids[0]+j`); they reappear in the `0x2624` edit-playlist container. These look
+like offsets but are **id-pool tokens** — none equals any block zmark. PT requires only that they
+are **present, consecutive, and unique per track**, not any specific value. Practical
+consequence: a duplicate must give the copy a *fresh* pool (else it collides with the source), and
+the absolute base is **source-dependent** — synth scaffold rows (0–7) draw from `base≈20661`
+while grow-path rows (`≥8`) draw from `base=1` (`ids[0]=10p+1`). So the pool is a `+10`-per-track
+slide, not a global `f(row)`.
+
+**4. Provenance, not position — `0x2104` view-scale.** The per-track `0x2104` block's inner
+`03 21` payload is either all-zero or the **constant** pattern
+`EF FF DF BF EF FF DF BF 02 00 00 00 … EF FF DF BF 02 00 00 00`. It is byte-identical across
+tracks that have it and distinguishes **grow-path** provenance (present on synth rows `≥8`) from
+**scaffold** provenance (zero on rows `0–7`) — independent of the final display row. A duplicate
+of a scaffold track therefore differs here from a fresh grown track; to reach byte-identity with a
+fresh session the writer regenerates the grow-path pattern (and pool) for the appended track.
+
+**Editing rule of thumb.** The numeric positional fields (1, 2) are **self-inverse under a
+slot re-key** — recomputing every field from its physical body slot works identically for add and
+remove. The free fields (3, 4) are **not** self-inverse; they are moved as a reversible *slide*
+(up on insert, down on remove) so the round-trip stays byte-exact. `body_synth`
+`_rekey_positional_by_slot` + `_renumber_body_after_duplicate` / `_unrenumber_free_fields_before_remove`
+implement exactly this.
+
+---
+
 ## 13. The waveform-overview cache (`WaveCache.wfm`) — **(PT-confirmed)**
 
 Pro Tools draws waveforms from a session-folder sidecar `WaveCache.wfm`, built only on
