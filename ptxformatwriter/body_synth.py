@@ -4367,6 +4367,212 @@ def _fix_name_table_intergroup(data: bytes) -> bytes:
     return bytes(out)
 
 
+# --- BODY positional renumber for a track add/remove -------------------------------
+# A duplicate/remove leaves the copy (or the shifted survivors) carrying the WRONG
+# per-track position-dependent BODY values: stereo channel indices, the several per-track
+# display ordinals, the 0x261c element-id pool + its k/k-1 counters, the grow-path
+# view-scale (0x2104), and the 0x1054 lane order. `remove_track`/`duplicate_track` already
+# rebuild the master index canonically; these helpers finish the job in the BODY so the
+# result is byte-identical to a fresh synth of the same layout (and the duplicate->remove
+# round-trip stays byte-exact). Scoped to ALL-STEREO sessions: every field below is a
+# function of the track's PHYSICAL body slot (== its 0-based display row for a uniform
+# session), computed from position -- never a fixed offset (offsets anchor on the block's
+# own name_end, which shifts with the track name's length). Mono/mixed sessions keep the
+# prior behaviour (the splice already loads clean); their per-track offsets differ.
+
+# the inner-0x2434 anchor whose +18 u32 holds the 1-based ordinal shared by the
+# 0x200a/0x200b/0x2015 nested subtree (the same bytes reappear in all three types).
+_ORD2015_ANCHOR = bytes([0x5A, 0x01, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x34, 0x24, 0x04,
+                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x00])
+# the grow-path 0x2104 edit-window view-scale payload (28 bytes @ block-offset 18); the
+# scaffold slots (physical rank < 8) carry an all-zero payload instead.
+_VIEW_SCALE_PAYLOAD = bytes([0xEF, 0xFF, 0xDF, 0xBF, 0xEF, 0xFF, 0xDF, 0xBF, 0x02, 0, 0, 0,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0xEF, 0xFF, 0xDF, 0xBF, 0x02, 0, 0, 0])
+_STEREO_SCAFFOLD_SLOTS = 8       # the inlined scaffold's track count (slots 0..7)
+# per-track 0x261c leaf offsets, RELATIVE TO THE BLOCK'S name_end:
+_B261C_EID_RUN = 1018            # ten consecutive u32 element ids (base .. base+9)
+_B261C_BLOB = 1103               # 160-byte self-contained "present-only" random field
+_B261C_BLOB_LEN = 160
+_B261C_C1 = 1290                 # u32 == slot   (k-1)
+_B261C_C2 = 1296                 # u16 == slot   (k-1)
+_B261C_C3 = 1474                 # u32 == slot+1 (k)
+_B261C_C4 = 1799                 # u32 == slot   (k-1)
+
+
+def _no_magic(b: bytes) -> bytes:
+    """Keep a free field clear of the 0x5A block magic (the parser scans payloads for it);
+    0x5A -> 0x5B is harmless for a present-only field. Same rule the unit synth uses."""
+    return bytes(0x5B if x == 0x5A else x for x in b)
+
+
+def _stereo_grow_blob(track_number: int) -> bytes:
+    """The 160-byte 0x261c free blob a fresh `synth_stereo_unit(track_number)` emits (a
+    present-only field keyed to the track number). Reproduced here so the appended track's
+    slot matches a fresh synth byte-for-byte."""
+    return _no_magic(bytes([0x00, 0xFF, 0x7F, 0x0A, 0x00])
+                     + bytes((track_number * 131 + i * 97) & 0xFF for i in range(155)))
+
+
+def _all_stereo(data: bytes) -> bool:
+    """True iff every track is a stereo audio track (the renumber's domain)."""
+    tts = track_types(data)
+    return bool(tts) and all(t.kind == "stereo" for t in tts)
+
+
+def _leaf_name_end(blk: bytes) -> "int | None":
+    """Block-relative offset just past the first length-prefixed ASCII track name in `blk`
+    (a `<u32 len><name>` slot). Every per-track field below anchors on this, so the offsets
+    hold for any name length."""
+    for k in range(4, len(blk) - 1):
+        nlen = int.from_bytes(blk[k - 4 : k], "little")
+        if 1 <= nlen <= 32 and all(0x20 <= c < 0x7F for c in blk[k : k + nlen]):
+            return k + nlen
+    return None
+
+
+def _blocks_by_type(data: bytes) -> "dict[int, list[tuple[int, int]]]":
+    """{content_type: [(zmark, end), ...]} in zmark order, from the size-driven block walk
+    (containers physically inline their per-track children, so patching a leaf's bytes also
+    fixes every container view of it)."""
+    ref = _FI.final_index_ref(data)
+    by: "dict[int, list[tuple[int, int]]]" = {}
+    for z, e, c in sorted(_raw_block_bounds(data, ref.start)):
+        by.setdefault(c, []).append((z, e))
+    return by
+
+
+def _b261c_free_field(body: bytes, z: int, e: int) -> "tuple[int, bytes]":
+    """(element-id base, 160-byte blob) of the 0x261c block at `[z, e)`."""
+    import struct
+    ne = z + _leaf_name_end(body[z:e])
+    base = struct.unpack_from("<I", body, ne + _B261C_EID_RUN)[0]
+    blob = bytes(body[ne + _B261C_BLOB : ne + _B261C_BLOB + _B261C_BLOB_LEN])
+    return base, blob
+
+
+def _set_b261c_free_field(body: bytearray, z: int, e: int, base: int, blob: bytes) -> None:
+    """Write a fresh element-id run (base .. base+9) + free blob into the 0x261c at `[z, e)`."""
+    import struct
+    ne = z + _leaf_name_end(bytes(body[z:e]))
+    for j in range(10):
+        struct.pack_into("<I", body, ne + _B261C_EID_RUN + 4 * j, (base + j) & 0xFFFFFFFF)
+    body[ne + _B261C_BLOB : ne + _B261C_BLOB + _B261C_BLOB_LEN] = blob
+
+
+def _rekey_positional_by_slot(data: bytes) -> bytes:
+    """Re-key every per-track BODY position field to its physical slot's canonical value
+    (all-stereo): 0x1014 channel indices (2s, 2s+1 at the two sites), the 0x200a/0x200b/0x2015
+    subtree ordinal (s+1), the 0x2519 name-table ordinals (s+1), the 0x251a lane ordinals
+    ((idx mod N)+1), the 0x2589 overview index (s), the 0x261c k/k-1 counters, and the 0x2104
+    grow-path view-scale (pattern for slots >= scaffold count, else zero). Pure function of
+    slot -> self-inverse (idempotent on an already-canonical session), so it serves both the
+    add and the remove direction. Containers are patched implicitly (they inline the leaves)."""
+    import struct
+    by = _blocks_by_type(data)
+    body = bytearray(data)
+    n = len(by.get(0x261C, []))
+    su16 = lambda p, v: struct.pack_into("<H", body, p, v & 0xFFFF)
+    su32 = lambda p, v: struct.pack_into("<I", body, p, v & 0xFFFFFFFF)
+
+    for s, (z, e) in enumerate(by.get(0x1014, [])):        # stereo channel indices
+        ne = z + _leaf_name_end(body[z:e])
+        c0 = 2 * s
+        su16(ne + 5, c0); su16(ne + 7, c0 + 1)             # SITE1 (two u16)
+        su32(ne + 32, c0); su32(ne + 36, c0 + 1)           # SITE2 (two u32)
+
+    for ct in (0x200A, 0x200B, 0x2015):                    # nested subtree ordinal (s+1)
+        for s, (z, e) in enumerate(by.get(ct, [])):
+            a = body.find(_ORD2015_ANCHOR, z, e)
+            if a >= 0:
+                su32(a + 18, s + 1)
+
+    if by.get(0x2519):                                     # name-table entry ordinals (s+1)
+        z, e = by[0x2519][0]
+        inside = [cz for cs in by.values() for cz, _ce in cs if z < cz < e]
+        region_end = min(inside) if inside else e
+        p, idx = z + 4, 0
+        while p < region_end:
+            nlen = int.from_bytes(body[p - 4 : p], "little")
+            if 1 <= nlen <= 32 and all(0x20 <= c < 0x7F for c in body[p : p + nlen]):
+                ne = p + nlen
+                if ne + 20 <= region_end:
+                    su16(ne + 18, idx + 1)
+                    idx += 1
+                p = ne + 1
+            else:
+                p += 1
+
+    for i, (z, e) in enumerate(by.get(0x251A, [])):        # lane ordinals ((idx mod N)+1)
+        nlen = struct.unpack_from("<I", body, z + 11)[0]
+        ne = z + 15 + nlen
+        su16(ne + 18, (i % n) + 1 if n else i + 1)
+
+    for s, (z, e) in enumerate(by.get(0x2589, [])):        # overview index (s, 0-based)
+        su16(z + 9, s)
+
+    for s, (z, e) in enumerate(by.get(0x261C, [])):        # 0x261c k/k-1 counters
+        ne = z + _leaf_name_end(body[z:e])
+        su32(ne + _B261C_C1, s); su16(ne + _B261C_C2, s)
+        su32(ne + _B261C_C3, s + 1); su32(ne + _B261C_C4, s)
+
+    for s, (z, e) in enumerate(by.get(0x2104, [])):        # grow-path view-scale
+        body[z + 18 : z + 18 + 28] = (_VIEW_SCALE_PAYLOAD if s >= _STEREO_SCAFFOLD_SLOTS
+                                      else bytes(28))
+    return bytes(body)
+
+
+def _regroup_copy_lanes(data: bytes, source_slot: int, channels: int) -> bytes:
+    """`duplicate_track` inserts each copy lane right after its source lane, interleaving the
+    copy's `channels` lanes through the source's (0x1052 in the shared 0x1054). Regroup them
+    so the copy's lanes form one consecutive group after the source's last lane -- the order a
+    fresh synth has. Lanes are equal-size (v1: copy name == source name length), so this is a
+    size-neutral block reorder. `source_slot` is the source track's 0-based display row."""
+    by = _blocks_by_type(data)
+    lanes = by.get(0x1052, [])
+    grp = lanes[channels * source_slot : channels * source_slot + 2 * channels]
+    if len(grp) != 2 * channels:
+        return data
+    src = [grp[2 * t] for t in range(channels)]            # even positions = source lanes
+    cpy = [grp[2 * t + 1] for t in range(channels)]        # odd  positions = copy   lanes
+    rs, re = grp[0][0], grp[-1][1]
+    return (data[:rs] + b"".join(data[z:e] for z, e in (src + cpy)) + data[re:])
+
+
+def _renumber_body_after_duplicate(data: bytes, copy_slot: int) -> bytes:
+    """BODY renumber run at the END of `duplicate_track` (all-stereo). `copy_slot` is the
+    copy's 0-based display row (source row + 1). Regroups the copy's lanes, slides every
+    downstream track's 0x261c free field (element-id pool + present-only blob) up one slot so
+    they are slot-aligned, gives the appended (physically-last) track a fresh grow-path free
+    field, then re-keys all pure-positional fields. Result: BODY byte-identical to synth(N)."""
+    n = len(_blocks_by_type(data).get(0x261C, []))
+    out = _regroup_copy_lanes(data, copy_slot - 1, 2)
+    by = _blocks_by_type(out)
+    b261c = by.get(0x261C, [])
+    body = bytearray(out)
+    free = [_b261c_free_field(body, z, e) for z, e in b261c]
+    for s in range(copy_slot, n - 1):                      # slide free fields up into slot order
+        _set_b261c_free_field(body, b261c[s][0], b261c[s][1], *free[s + 1])
+    _set_b261c_free_field(body, b261c[n - 1][0], b261c[n - 1][1],   # appended: fresh grow-path field
+                          10 * (n - 1) + 1, _stereo_grow_blob(n))
+    return _rekey_positional_by_slot(bytes(body))
+
+
+def _unrenumber_free_fields_before_remove(data: bytes, remove_slot: int) -> bytes:
+    """Inverse of the duplicate free-field slide, applied BEFORE `remove_track` splices the
+    copy out (all-stereo). Slides each downstream track's 0x261c free field DOWN one slot,
+    sourcing the removed slot's own field, so that after the splice + `_rekey_positional_by_slot`
+    the survivors carry exactly the pre-duplicate values (byte-exact round-trip). `remove_slot`
+    is the removed track's 0-based display row."""
+    by = _blocks_by_type(data)
+    b261c = by.get(0x261C, [])
+    n = len(b261c)
+    body = bytearray(data)
+    free = [_b261c_free_field(body, z, e) for z, e in b261c]
+    for s in range(n - 1, remove_slot, -1):
+        _set_b261c_free_field(body, b261c[s][0], b261c[s][1], *free[s - 1])
+    return bytes(body)
+
+
 def remove_track(data: bytes, track_name: str) -> bytes:
     """Remove an AUDIO track (with all its clips) from an arbitrary session, leaving every
     other track/clip/plugin/automation intact.
@@ -4383,6 +4589,16 @@ def remove_track(data: bytes, track_name: str) -> bytes:
     equals a real session's, the EOS simulator (`validate`) is clean, rc=0, and every other
     block is byte-identical."""
     nb = track_name.encode()
+    # BODY renumber, phase 1 (all-stereo): BEFORE the splice, slide each downstream track's
+    # 0x261c free field (element-id pool + present-only blob) DOWN one slot, sourcing the
+    # removed track's own field. This is the exact inverse of the duplicate slide, so after
+    # the splice + phase-2 re-key the survivors carry the pre-duplicate values (byte-exact
+    # round-trip). Size-neutral, so `data`'s block offsets stay valid. No-op for mono/mixed.
+    _do_renumber = _all_stereo(data)
+    if _do_renumber:
+        _names_before = [t.name for t in track_types(data)]
+        if track_name in _names_before:
+            data = _unrenumber_free_fields_before_remove(data, _names_before.index(track_name))
     ref = _FI.final_index_ref(data)
     bl = sorted(_raw_block_bounds(data, ref.start))
     zend = {z: e for z, e, _c in bl}
@@ -4542,7 +4758,13 @@ def remove_track(data: bytes, track_name: str) -> bytes:
     out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
     out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
     out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32
-    return _fix_name_table_count(_fix_container_counts(out))
+    out = _fix_name_table_count(_fix_container_counts(out))
+    # BODY renumber, phase 2 (all-stereo): re-key every survivor's pure-positional fields to
+    # its new physical slot (self-inverse; combined with phase 1 this exactly reverses the
+    # duplicate renumber, keeping the round-trip byte-exact).
+    if _do_renumber:
+        out = _rekey_positional_by_slot(out)
+    return out
 
 
 def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
@@ -4572,6 +4794,11 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
     import struct
     if len(new_name) != len(source_track):
         raise ValueError("v1: new_name must be the same length as source_track")
+    # the source's 0-based display row (the copy is spliced in right after it, so the copy's
+    # row is source_row + 1); captured before any edit for the closing BODY renumber.
+    _names_before = [t.name for t in track_types(data)]
+    _source_row = _names_before.index(source_track) if source_track in _names_before else None
+    _do_renumber = _all_stereo(data)
     ref = _FI.final_index_ref(data)
     bl = sorted(_raw_block_bounds(data, ref.start))
     zend = {z: e for z, e, _c in bl}
@@ -4748,7 +4975,13 @@ def duplicate_track(data: bytes, source_track: str, new_name: str) -> bytes:
     out = _set_index_offset(bytes(body) + _FI.serialize_final_block(recs))
     out = _fix_all_ordinal_counts(out)                   # <ALL> u16 counts (0x202a/0x202b)
     out = _fix_name_table_intergroup(out)                # 0x2519 inter-group u32
-    return _fix_name_table_count(_fix_container_counts(out))
+    out = _fix_name_table_count(_fix_container_counts(out))
+    # BODY positional renumber (all-stereo): give the copy its display slot's channels/ordinals/
+    # element-ids/view-scale/lane order, and slot-align every downstream track -- so the BODY is
+    # byte-identical to a fresh synth(N+1). No-op (prior clean behaviour) for mono/mixed.
+    if _do_renumber and _source_row is not None:
+        out = _renumber_body_after_duplicate(out, _source_row + 1)
+    return out
 
 
 # --- arbitrary track naming --------------------------------------------------

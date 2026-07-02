@@ -1043,9 +1043,8 @@ class ContainerCountValidatorTests(unittest.TestCase):
         byte-identical (mod GUID) to a fresh synth(N+1) of the same track layout. Guards
         `final_index.canonicalize_after_track_add` (split the doubled per-track
         elements/instance records into synth's separate body-rank-ordered ones + re-rank the
-        ordinals). Only the INDEX is asserted equal: the copy is inserted after the source, so
-        the BODY block order differs from a fresh synth (same positional fact as a middle
-        removal). The round-trip back to the original is byte-exact."""
+        ordinals). The BODY positional renumber (below) makes the rest of the file match too;
+        this test isolates the INDEX rebuild. The round-trip back to the original is byte-exact."""
         norm = self._norm_guid
         for src in ("Gtr", "Vox"):     # 3-char names, so 'Zed' matches the length constraint
             b8 = self._base()
@@ -1058,6 +1057,60 @@ class ContainerCountValidatorTests(unittest.TestCase):
                              msg=f"duplicate index of {src!r} != synth(9) index")
             # and the round-trip back to the original is byte-exact
             self.assertEqual(BS.remove_track(dup, "Zed"), b8)
+
+    def test_duplicate_body_matches_valid(self):
+        """The BODY positional renumber makes a stereo duplicate byte-identical (mod GUID) to a
+        fresh synth(N+1) of the same display layout -- the WHOLE file, not just the index. It
+        fixes the copy's (and every downstream track's) position-dependent BODY fields as a
+        function of display slot: 0x1014/0x1015 stereo channel indices (the collision that
+        crashed Pro Tools on close), the 0x200a/0x200b/0x2015 + 0x2519 + 0x251a display
+        ordinals, the 0x2589 overview index (and its 0x2551/0x2587/0x258a/0x258b containers),
+        the 0x261b/0x261c/0x2624 element-id pool + k/k-1 counters, the grow-path 0x2104
+        view-scale, and the 0x1054 lane order. Verified at N=8 (every insert row) and N=20, and
+        the duplicate->remove round-trip stays byte-exact (the renumber is self-inverting)."""
+        from collections import defaultdict
+        norm = self._norm_guid
+
+        def per_type_diffs(a, b):
+            """[(hex(type), rank)] where the two sessions' i-th block of a real type differ."""
+            def bt(d):
+                m = defaultdict(list)
+                for z, e, c in sorted(BS._raw_block_bounds(d, FI.final_index_ref(d).start)):
+                    m[c].append(norm(d[z:e]))
+                return m
+            A, B = bt(a), bt(b)
+            out = []
+            for c in sorted(set(A) | set(B)):
+                if c >= 0x4b00:
+                    continue
+                la, lb = A.get(c, []), B.get(c, [])
+                for i in range(min(len(la), len(lb))):
+                    if la[i] != lb[i]:
+                        out.append((hex(c), i))
+                if len(la) != len(lb):
+                    out.append((hex(c), "COUNT"))
+            return out
+
+        # N=8: duplicate at several display rows (top / middle / near end).
+        base8 = self._base()
+        for src in ("Kick", "Bass", "Perc"):          # 4-char names, so 'Bas2' matches the length
+            dup = BS.duplicate_track(base8, src, "Bas2")
+            layout = [t.name for t in BS.track_types(dup)]
+            ref9 = BS.set_track_names(BS.synthesize_stereo_inline(9), layout)
+            self.assertEqual(per_type_diffs(dup, ref9), [],
+                             msg=f"per-type body diffs for {src!r}")
+            self.assertEqual(norm(dup), norm(ref9),
+                             msg=f"duplicate BODY of {src!r} != synth(9) whole file")
+            self.assertEqual(BS.remove_track(dup, "Bas2"), base8,
+                             msg=f"round-trip for {src!r}")
+        # N=20: a middle duplicate matches synth(21) whole-file and round-trips.
+        names20 = [f"Trk{i:02d}" for i in range(20)]
+        b20 = BS.set_track_names(BS.synthesize_stereo_inline(20), names20)
+        dup = BS.duplicate_track(b20, "Trk09", "Dpx09")
+        ref21 = BS.set_track_names(BS.synthesize_stereo_inline(21),
+                                   [t.name for t in BS.track_types(dup)])
+        self.assertEqual(norm(dup), norm(ref21), msg="N=20 duplicate BODY != synth(21)")
+        self.assertEqual(BS.remove_track(dup, "Dpx09"), b20, msg="N=20 round-trip")
 
     def test_track_edits_match_valid_structure(self):
         """A duplicate's per-track block delta equals a real N+1-track session's (real block
